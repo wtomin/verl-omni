@@ -13,7 +13,6 @@
 # limitations under the License.
 
 from . import (  # noqa: F401 — names for __all__ aggregation
-    _patch,  # noqa: F401 — apply Ulysses mask fix
     qwen_image_flow_grpo,
     sd3_5,
 )
