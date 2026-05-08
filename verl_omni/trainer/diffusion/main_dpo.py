@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """
-Entrypoint for DPO / diffusion model training for SD3.5.
+Entrypoint for DPO / diffusion model training for SD3 (Stable Diffusion 3.x).
 """
 
 import os

@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """
-DPO Trainer for diffusion models (SD3.5) with Ray-based distributed training.
+DPO Trainer for diffusion models (SD3) with Ray-based distributed training.
 """
 
 import json
@@ -59,7 +59,7 @@ logger = __import__("logging").getLogger(__file__)
 
 
 class RayDPOTrainer:
-    """Distributed DPO trainer using Ray for diffusion models (e.g., SD3.5).
+    """Distributed DPO trainer using Ray for diffusion models (e.g., SD3).
 
     This trainer implements the Diffusion-DPO algorithm for flow-matching models.
     It orchestrates distributed training across multiple nodes and GPUs,

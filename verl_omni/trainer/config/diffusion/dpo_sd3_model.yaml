@@ -1,14 +1,14 @@
-# Model configuration for SD3.5 DPO training
+# Model configuration for SD3 (Stable Diffusion 3.x) DPO training
 # This config is used by dpo_trainer.yaml
 
-# SD3.5 model path
+# Default checkpoint (SD3.5 medium); override with SD3.0 weights if desired
 path: "stabilityai/stable-diffusion-3.5-medium"
 
 # Model type must be "diffusion_model" for verl-omni
 model_type: "diffusion_model"
 
 # Architecture name must match registered name in DiffusionModelBase
-# "StableDiffusion3Pipeline" is registered in sd3_5/dpo_training_adapter.py
+# "StableDiffusion3Pipeline" is registered in pipelines/sd3/diffusers_training_adapter.py
 architecture: "StableDiffusion3Pipeline"
 
 # Local path for downloaded model (optional)
@@ -32,7 +32,7 @@ pipeline:
 # Use remove padding (for diffusion models, usually false)
 use_remove_padding: false
 
-# VAE scale factor for SD3.5
+# VAE scale factor for SD3
 vae_scale_factor: 8
 
 # Trust remote code (may be needed for some models)

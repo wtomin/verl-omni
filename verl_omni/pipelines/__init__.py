@@ -12,11 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from . import (  # noqa: F401 — names for __all__ aggregation
+from . import (  # noqa: F401
     qwen_image_flow_grpo,
-    sd3_5,
+    sd3,
 )
 from .qwen_image_flow_grpo import *  # noqa: F401, F403
-from .sd3_5 import *  # noqa: F401, F403
+from .sd3 import *  # noqa: F401, F403
 
-__all__ = list(qwen_image_flow_grpo.__all__) + list(sd3_5.__all__)
+__all__ = list(qwen_image_flow_grpo.__all__) + list(sd3.__all__)

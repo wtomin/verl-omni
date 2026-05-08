@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """
-SD3.5 training-side adapter for diffusers-based diffusion DPO training.
+SD3 (Stable Diffusion 3.x) training-side adapter for diffusers-based diffusion RL.
 """
 
 from typing import Optional
@@ -27,10 +27,10 @@ from verl_omni.pipelines.model_base import DiffusionModelBase
 from verl_omni.pipelines.schedulers import FlowMatchSDEDiscreteScheduler
 from verl_omni.workers.config import DiffusionModelConfig
 
-__all__ = ["SD35Adapter"]
+__all__ = ["SD3Adapter"]
 
 
-def _build_sd3_5_scheduler(model_path: str) -> FlowMatchSDEDiscreteScheduler:
+def _build_sd3_scheduler(model_path: str) -> FlowMatchSDEDiscreteScheduler:
     euler = FlowMatchEulerDiscreteScheduler.from_pretrained(
         pretrained_model_name_or_path=model_path,
         subfolder="scheduler",
@@ -38,7 +38,7 @@ def _build_sd3_5_scheduler(model_path: str) -> FlowMatchSDEDiscreteScheduler:
     return FlowMatchSDEDiscreteScheduler.from_config(euler.config)
 
 
-def _configure_sd3_5_scheduler(
+def _configure_sd3_scheduler(
     scheduler: FlowMatchSDEDiscreteScheduler,
     *,
     num_inference_steps: int,
@@ -48,13 +48,13 @@ def _configure_sd3_5_scheduler(
 
 
 @DiffusionModelBase.register("StableDiffusion3Pipeline")
-class SD35Adapter(DiffusionModelBase):
-    """Training adapter for the SD3.5 diffusion model.
+class SD3Adapter(DiffusionModelBase):
+    """Training adapter for Stable Diffusion 3.x (e.g. SD3.0, SD3.5) diffusion models.
 
     Implements the :class:`~verl_omni.pipelines.model_base.DiffusionModelBase`
     interface for the ``StableDiffusion3Pipeline`` architecture, providing scheduler
     configuration, model-input construction, and the forward/sampling step
-    used during DPO training.
+    used during RL training (e.g. DPO, FlowGRPO).
 
     Registered under ``"StableDiffusion3Pipeline"`` so it is automatically selected
     when ``DiffusionModelConfig.architecture`` matches that name.
@@ -62,7 +62,7 @@ class SD35Adapter(DiffusionModelBase):
 
     @classmethod
     def build_scheduler(cls, model_config: DiffusionModelConfig):
-        """Build and configure the flow-matching scheduler for SD3.5.
+        """Build and configure the flow-matching scheduler for SD3.
 
         Args:
             model_config (DiffusionModelConfig): Configuration for the diffusion model,
@@ -72,13 +72,13 @@ class SD35Adapter(DiffusionModelBase):
             FlowMatchSDEDiscreteScheduler: Scheduler with timesteps already set
                 for the current device.
         """
-        scheduler = _build_sd3_5_scheduler(model_config.local_path)
+        scheduler = _build_sd3_scheduler(model_config.local_path)
         cls.set_timesteps(scheduler, model_config, get_device_name())
         return scheduler
 
     @classmethod
     def set_timesteps(cls, scheduler: FlowMatchSDEDiscreteScheduler, model_config: DiffusionModelConfig, device: str):
-        """Configure timesteps on the scheduler for SD3.5.
+        """Configure timesteps on the scheduler for SD3.
 
         Args:
             scheduler (FlowMatchSDEDiscreteScheduler): The scheduler whose timesteps
@@ -87,7 +87,7 @@ class SD35Adapter(DiffusionModelBase):
                 number of inference steps.
             device (str): The device (e.g. ``"cuda"``) to move the timesteps to.
         """
-        _configure_sd3_5_scheduler(
+        _configure_sd3_scheduler(
             scheduler,
             num_inference_steps=model_config.pipeline.num_inference_steps,
             device=device,
@@ -107,10 +107,10 @@ class SD35Adapter(DiffusionModelBase):
         micro_batch: TensorDict,
         step: int,
     ) -> tuple[dict, dict]:
-        """Build SD3.5-specific inputs for the transformer forward pass.
+        """Build SD3-specific inputs for the transformer forward pass.
 
         Args:
-            module (SD3Transformer2DModel): The SD3.5 transformer module.
+            module (SD3Transformer2DModel): The SD3 transformer module.
             model_config (DiffusionModelConfig): Configuration providing guidance
                 scale and other model settings.
             latents (torch.Tensor): Full latent tensor of shape ``(B, T, ...)``.
@@ -130,9 +130,8 @@ class SD35Adapter(DiffusionModelBase):
         hidden_states = latents[:, step]
         timestep = timesteps[:, step]
 
-        # SD3.5 uses pooled projections for the second text encoder
-        # prompt_embeds contains the hidden states, and we need to handle the pooled embeds
-        # The pooled_prompt_embeds are passed separately in SD3Pipeline
+        # SD3 uses pooled projections for the second text encoder; pooled_prompt_embeds
+        # are passed separately in StableDiffusion3Pipeline.
         pooled_prompt_embeds = micro_batch.get("pooled_prompt_embeds", None)
         pooled_negative_prompt_embeds = micro_batch.get("pooled_negative_prompt_embeds", None)
 
@@ -165,13 +164,13 @@ class SD35Adapter(DiffusionModelBase):
         scheduler_inputs: Optional[TensorDict | dict[str, torch.Tensor]],
         step: int,
     ):
-        """Run the SD3.5 transformer and sample the previous denoising step.
+        """Run the SD3 transformer and sample the previous denoising step.
 
         Used by RL algorithms (DPO, FlowGRPO) that require log-probabilities for
-        reversed-sampling.
+        reversed sampling.
 
         Args:
-            module (SD3Transformer2DModel): The SD3.5 transformer module.
+            module (SD3Transformer2DModel): The SD3 transformer module.
             scheduler (FlowMatchSDEDiscreteScheduler): Scheduler used to sample
                 the previous step and compute log-probabilities.
             model_config (DiffusionModelConfig): Configuration providing

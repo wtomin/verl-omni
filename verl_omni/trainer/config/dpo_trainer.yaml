@@ -1,4 +1,4 @@
-# DPO Training Configuration for SD3.5
+# DPO Training Configuration for SD3 (Stable Diffusion 3.x)
 # Format checks enforced on CI:
 # 1. Comments must appear above each field.
 # 2. There must be a blank line between each field.
@@ -22,8 +22,8 @@ defaults:
   # Rollout model config
   - diffusion/rollout@actor_rollout_ref.rollout: diffusion_rollout
 
-  # Model config for SD3.5
-  - diffusion/model@actor_rollout_ref.model: dpo_sd35_model
+  # Model config for SD3
+  - diffusion/model@actor_rollout_ref.model: dpo_sd3_model
 
   # Reward config (optional, for validation)
   - reward@reward: reward
@@ -44,7 +44,7 @@ actor_rollout_ref:
     # Select diffusion model type
     model_type: "diffusion_model"
 
-    # SD3.5 model path
+    # SD3 checkpoint (default: SD3.5 medium)
     path: "stabilityai/stable-diffusion-3.5-medium"
 
     # Pipeline type (must match registered name in DiffusionModelBase)
@@ -98,7 +98,7 @@ trainer:
   project_name: verl_dpo_examples
 
   # Experiment name for run identification
-  experiment_name: sd35_dpo
+  experiment_name: sd3_dpo
 
   # Logging backends to use: "console", "wandb", etc.
   logger: ["console"]

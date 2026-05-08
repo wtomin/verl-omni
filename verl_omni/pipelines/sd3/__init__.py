@@ -12,9 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """
-SD3.5 pipeline module for verl-omni DPO training.
+SD3 (Stable Diffusion 3.x) pipeline module for verl-omni diffusion training.
 """
 
-from .dpo_training_adapter import SD35Adapter
+from .diffusers_training_adapter import SD3Adapter
 
-__all__ = ["SD35Adapter"]
+__all__ = ["SD3Adapter"]
