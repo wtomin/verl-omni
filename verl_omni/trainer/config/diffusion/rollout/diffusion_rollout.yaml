@@ -94,6 +94,9 @@ disable_log_stats: True
 # number of responses (i.e. num sample times). > 1 for grpo
 n: 1
 
+# Number of samples per prompt for DPO pair construction
+k_samples: 4
+
 # Multi-turn interaction config for tools or chat.
 multi_turn:
 

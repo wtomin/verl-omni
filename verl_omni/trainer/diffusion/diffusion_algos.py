@@ -74,6 +74,7 @@ class DiffusionAdvantageEstimator(str, Enum):
     """Advantage estimators specific to diffusion-based training."""
 
     FLOW_GRPO = "flow_grpo"
+    DPO = "dpo"
 
 
 DIFFUSION_ADV_ESTIMATOR_REGISTRY: dict[str, Any] = {}
@@ -352,3 +353,76 @@ def kl_penalty_image(
     """
     kl_loss = ((prev_sample_mean - ref_prev_sample_mean) ** 2).mean(dim=(1, 2), keepdim=True) / (2 * std_dev_t**2)
     return kl_loss.mean()
+
+
+def _spatial_mse_per_sample(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    """Channel/spatial mean squared error, one scalar per batch row."""
+    if pred.shape != target.shape:
+        raise ValueError(f"Mismatched shapes for FM DPO tensors: pred {pred.shape}, target {target.shape}")
+    if pred.ndim <= 1:
+        return (pred.float() - target.float()).square()
+    spatial_dims = tuple(range(1, pred.ndim))
+    return (pred.float() - target.float()).square().mean(dim=spatial_dims)
+
+
+def compute_diffusion_dpo_fm_loss(
+    policy_noise_pred: torch.Tensor,
+    ref_noise_pred: torch.Tensor,
+    fm_velocity_target: torch.Tensor,
+    pair_chosen: torch.Tensor,
+    pair_rejected: torch.Tensor,
+    beta: float,
+) -> tuple[torch.Tensor, dict[str, Any]]:
+    """Explicit diffusion DPO objective from pairwise flow-matching MSE gaps.
+
+    Matches the logits-free loss used when comparing policy vs reference predictions
+    to a velocity target ``noise - x_0`` (see diffusion DPO / contrastive reward literature).
+
+    Loss (one term per preference pair):
+
+        ``L = mean( -log σ( -β/2 * ( w_diff - l_diff ) ) )``
+
+    where::
+
+        ``w_diff = θ_err_w - ref_err_w``, ``l_diff = θ_err_l - ref_err_l``
+
+    and θ_err denotes per-sample FM MSE ``mean((pred - target)²)`` over spatial dimensions.
+
+    Args:
+        policy_noise_pred: Policy (θ) transformer output velocity prediction, batched like training rollout.
+        ref_noise_pred: Reference velocity prediction from the frozen base weights.
+        fm_velocity_target: Regression target aligned with ``policy_noise_pred`` (e.g. ``noise - x_0``).
+        pair_chosen: Long indices ``(num_pairs,)`` into batch dimension for preferred samples ``w``.
+        pair_rejected: Long indices ``(num_pairs,)`` into batch dimension for dispreferred samples ``l``.
+        beta: Temperature from DPO preference strength.
+
+    Returns:
+        Scalar loss tensor and a metrics dictionary.
+    """
+    if pair_chosen.numel() == 0:
+        raise ValueError("FM-DPO requires at least one chosen/rejected preference pair")
+
+    theta_err = _spatial_mse_per_sample(policy_noise_pred, fm_velocity_target)
+    ref_err = _spatial_mse_per_sample(ref_noise_pred.detach(), fm_velocity_target)
+
+    theta_w_err = theta_err.index_select(0, pair_chosen)
+    theta_l_err = theta_err.index_select(0, pair_rejected)
+    ref_w_err = ref_err.index_select(0, pair_chosen)
+    ref_l_err = ref_err.index_select(0, pair_rejected)
+
+    w_diff = theta_w_err - ref_w_err
+    l_diff = theta_l_err - ref_l_err
+    w_l_diff = w_diff - l_diff
+    inside_term = -0.5 * beta * w_l_diff
+    dpo_loss = -torch.nn.functional.logsigmoid(inside_term).mean()
+
+    with torch.no_grad():
+        implicit_reward_chosen = -0.5 * beta * (theta_w_err - ref_w_err)
+        implicit_reward_rejected = -0.5 * beta * (theta_l_err - ref_l_err)
+        implicit_accuracy = (implicit_reward_chosen > implicit_reward_rejected).float().mean()
+
+    dpo_metrics = {
+        "actor/dpo_loss": dpo_loss.detach().item(),
+        "actor/dpo_implicit_accuracy": implicit_accuracy.detach().item(),
+    }
+    return dpo_loss, dpo_metrics

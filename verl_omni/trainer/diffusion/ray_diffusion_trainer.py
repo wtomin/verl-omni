@@ -54,10 +54,35 @@ from verl_omni.trainer.config import DiffusionAlgoConfig
 from verl_omni.trainer.diffusion.diffusion_algos import DiffusionAdvantageEstimator, get_diffusion_adv_estimator_fn
 from verl_omni.trainer.diffusion.diffusion_metric_utils import (
     compute_data_metrics_diffusion,
+    compute_reward_metrics_diffusion,
     compute_throughput_metrics_diffusion,
     compute_timing_metrics_diffusion,
 )
 from verl_omni.workers.utils.padding import embeds_padding_2_no_padding
+
+logger = __import__("logging").getLogger(__file__)
+
+
+def _is_numeric_metric_value(value: Any) -> bool:
+    return isinstance(value, (int, float, np.number)) and not isinstance(value, bool)
+
+
+def _numeric_validation_reward_infos(reward_extra_infos_dict: dict[str, list]) -> dict[str, list]:
+    """Keep only numeric reward extras for verl's validation metric reducer."""
+    numeric_infos = {}
+    for key, values in reward_extra_infos_dict.items():
+        if not values:
+            continue
+        if all(_is_numeric_metric_value(value) for value in values):
+            numeric_infos[key] = [float(value) for value in values]
+            continue
+        if all(isinstance(value, dict) for value in values):
+            subkeys = sorted({subkey for value in values for subkey in value})
+            for subkey in subkeys:
+                subvalues = [value.get(subkey) for value in values]
+                if all(_is_numeric_metric_value(value) for value in subvalues):
+                    numeric_infos[f"{key}/{subkey}"] = [float(value) for value in subvalues]
+    return numeric_infos
 
 
 def compute_advantage(
@@ -106,12 +131,46 @@ def compute_advantage(
     return data
 
 
-class RayFlowGRPOTrainer:
-    """Distributed Flow-GRPO trainer using Ray for scalable reinforcement learning.
+def compute_dpo_pair_advantage(
+    data: DataProto,
+    _config: Optional[DiffusionAlgoConfig] = None,
+) -> DataProto:
+    """Form chosen/rejected preference pairs per prompt UID for diffusion FM-DPO training."""
+    sample_level_scores = data.batch["sample_level_scores"]
+    rewards = sample_level_scores.sum(-1) if sample_level_scores.ndim > 1 else sample_level_scores
+    uids = data.non_tensor_batch.get("uid", None)
+    if uids is None:
+        raise ValueError("UIDs are required for DPO advantage computation")
+
+    uid_to_indices = defaultdict(list)
+    for i, uid in enumerate(uids):
+        uid_to_indices[uid].append(i)
+
+    pair_chosen: list[int] = []
+    pair_rejected: list[int] = []
+
+    for indices in uid_to_indices.values():
+        if len(indices) < 2:
+            continue
+
+        group_rewards = rewards[indices]
+        sorted_indices = torch.argsort(group_rewards, descending=True)
+        chosen_idx = int(indices[int(sorted_indices[0].item())])
+        rejected_idx = int(indices[int(sorted_indices[-1].item())])
+        pair_chosen.append(chosen_idx)
+        pair_rejected.append(rejected_idx)
+
+    data.meta_info["dpo_pair_chosen_indices"] = np.asarray(pair_chosen, dtype=np.int64)
+    data.meta_info["dpo_pair_rejected_indices"] = np.asarray(pair_rejected, dtype=np.int64)
+
+    return data
+
+
+class BaseRayDiffusionTrainer:
+    """Base Ray trainer for diffusion policy optimization algorithms.
 
     This trainer orchestrates distributed PPO training across multiple nodes and GPUs,
-    managing actor rollouts and reward computation with Ray backend.
-    Supports various model architectures including FSDP, Megatron, vLLM, and SGLang integration.
+    managing actor rollouts, reward computation, checkpoints, and validation.
     """
 
     def __init__(
@@ -379,6 +438,21 @@ class RayFlowGRPOTrainer:
 
         return gen_batch
 
+    def _rollout_repeat_times(self) -> int:
+        return self.config.actor_rollout_ref.rollout.n
+
+    def _get_train_gen_batch(self, batch: DataProto) -> DataProto:
+        gen_batch = self._get_gen_batch(batch)
+        gen_batch.meta_info["global_steps"] = self.global_steps
+        return gen_batch
+
+    def _repeat_gen_batch(self, gen_batch: DataProto) -> DataProto:
+        return gen_batch.repeat(repeat_times=self._rollout_repeat_times(), interleave=True)
+
+    def _merge_rollout_batch(self, batch: DataProto, gen_batch_output: DataProto) -> DataProto:
+        batch = batch.repeat(repeat_times=self._rollout_repeat_times(), interleave=True)
+        return batch.union(gen_batch_output)
+
     def _compute_reward_colocate(self, batch: DataProto) -> tuple[torch.Tensor, dict[str, Any]] | torch.Tensor:
         """
         compute reward use colocate reward model
@@ -501,7 +575,8 @@ class RayFlowGRPOTrainer:
         return self._val_metrics_update(data_sources, sample_uids, reward_extra_infos_dict, sample_turns)
 
     def _val_metrics_update(self, data_sources, sample_uids, reward_extra_infos_dict, sample_turns):
-        data_src2var2metric2val = process_validation_metrics(data_sources, sample_uids, reward_extra_infos_dict)
+        metric_reward_infos = _numeric_validation_reward_infos(reward_extra_infos_dict)
+        data_src2var2metric2val = process_validation_metrics(data_sources, sample_uids, metric_reward_infos)
         metric_dict = {}
         for data_source, var2metric2val in data_src2var2metric2val.items():
             core_var = "acc" if "acc" in var2metric2val else "reward"
@@ -812,6 +887,15 @@ class RayFlowGRPOTrainer:
         old_log_prob = tu.get_tensordict(old_log_prob_dict)
         return DataProto.from_tensordict(old_log_prob)
 
+    def _require_log_probs(self) -> bool:
+        return True
+
+    def _require_reference_log_probs(self) -> bool:
+        return self.use_reference_policy
+
+    def _actor_mini_batch_size(self) -> int:
+        return self.config.actor_rollout_ref.actor.ppo_mini_batch_size * self._rollout_repeat_times()
+
     def _update_actor(self, batch: DataProto) -> DataProto:
         rollout_config = self.config.actor_rollout_ref.rollout
         batch.meta_info["multi_turn"] = rollout_config.multi_turn.enable
@@ -819,8 +903,7 @@ class RayFlowGRPOTrainer:
         batch_td = batch.to_tensordict()
         # step 2: convert from padding to no-padding
         batch_td = embeds_padding_2_no_padding(batch_td)
-        ppo_mini_batch_size = self.config.actor_rollout_ref.actor.ppo_mini_batch_size
-        ppo_mini_batch_size = ppo_mini_batch_size * self.config.actor_rollout_ref.rollout.n
+        ppo_mini_batch_size = self._actor_mini_batch_size()
         ppo_epochs = self.config.actor_rollout_ref.actor.ppo_epochs
         seed = self.config.actor_rollout_ref.actor.data_loader_seed
         shuffle = self.config.actor_rollout_ref.actor.shuffle
@@ -854,10 +937,51 @@ class RayFlowGRPOTrainer:
             self.actor_rollout_wg.stop_profile()
             if self.use_reference_policy and not self.ref_in_actor:
                 self.ref_policy_wg.stop_profile()
+    
+    def _compute_algorithm_advantage(
+        self,
+        batch: DataProto,
+        reward_tensor: torch.Tensor,
+        reward_extra_infos_dict: dict[str, list],
+    ) -> DataProto:
+        batch.batch["sample_level_scores"] = reward_tensor
+        if reward_extra_infos_dict:
+            batch.non_tensor_batch.update({k: np.array(v) for k, v in reward_extra_infos_dict.items()})
+
+        num_timesteps = batch.batch["old_log_probs"].shape[1]
+        batch.batch["sample_level_rewards"] = batch.batch["sample_level_scores"].expand(-1, num_timesteps)
+
+        norm_adv_by_std_in_grpo = self.config.algorithm.get("norm_adv_by_std_in_grpo", True)
+        return compute_advantage(
+            batch,
+            adv_estimator=self.config.algorithm.adv_estimator,
+            norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
+            global_std=self.config.algorithm.global_std,
+            config=self.config.algorithm,
+        )
+
+    def _update_post_training_metrics(self, batch: DataProto, metrics: dict[str, Any]) -> None:
+        gradient_norm = metrics.get("actor/grad_norm", None)
+        metrics.update(compute_variance_proxy_metrics(batch=batch, gradient_norm=gradient_norm))
+
+        # This is experimental and may be changed/removed in the future in favor of a general-purpose one.
+        if isinstance(self.train_dataloader.sampler, AbstractCurriculumSampler):
+            self.train_dataloader.sampler.update(batch=batch)
+
+    def _on_train_batch_end(self, batch: DataProto) -> None:
+        if hasattr(self.train_dataset, "on_batch_end"):
+            # The dataset may be changed after each training batch.
+            self.train_dataset.on_batch_end(batch=batch)
+
+    def _compute_training_data_metrics(self, batch: DataProto) -> dict[str, Any]:
+        return compute_data_metrics_diffusion(batch=batch)
+
+    def _num_training_images(self, batch: DataProto) -> int:
+        return batch.batch["advantages"].shape[0]
 
     def fit(self):
         """
-        The training loop of FlowGRPO.
+        The training loop of a diffusion policy optimization algorithm.
         The driver process only need to call the compute functions of the worker group through RPC
         to construct the PPO dataflow.
         The light-weight advantage computation is done on the driver process.
@@ -928,13 +1052,8 @@ class RayFlowGRPOTrainer:
                     [str(uuid.uuid4()) for _ in range(len(batch.batch))], dtype=object
                 )
 
-                gen_batch = self._get_gen_batch(batch)
-
-                # pass global_steps to trace
-                gen_batch.meta_info["global_steps"] = self.global_steps
-                gen_batch_output = gen_batch.repeat(
-                    repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True
-                )
+                gen_batch = self._get_train_gen_batch(batch)
+                gen_batch_output = self._repeat_gen_batch(gen_batch)
 
                 is_last_step = self.global_steps >= self.total_training_steps
                 with marked_timer("step", timing_raw):
@@ -946,9 +1065,7 @@ class RayFlowGRPOTrainer:
                         timing_raw.update(gen_batch_output.meta_info["timing"])
                         gen_batch_output.meta_info.pop("timing", None)
 
-                    # repeat to align with repeated responses in rollout
-                    batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
-                    batch = batch.union(gen_batch_output)
+                    batch = self._merge_rollout_batch(batch, gen_batch_output)
 
                     with marked_timer("reward", timing_raw, color="yellow"):
                         # compute reward model score
@@ -959,47 +1076,26 @@ class RayFlowGRPOTrainer:
                         # extract reward_tensor and reward_extra_infos_dict for training
                         reward_tensor, reward_extra_infos_dict = extract_reward(batch)
 
-                    bypass_recomputing_logprobs = self.config.algorithm.get("bypass_mode", False)
-                    if bypass_recomputing_logprobs:  # Use `rollout_log_probs`
-                        batch.batch["old_log_probs"] = batch.batch["rollout_log_probs"]
-                    else:  # Recompute old_log_probs
-                        with marked_timer("old_log_prob", timing_raw, color="blue"):
-                            old_log_prob = self._compute_old_log_prob(batch)
-                            batch = batch.union(old_log_prob)
+                    if self._require_log_probs():
+                        bypass_recomputing_logprobs = self.config.algorithm.get("bypass_mode", False)
+                        if bypass_recomputing_logprobs:  # Use `rollout_log_probs`
+                            batch.batch["old_log_probs"] = batch.batch["rollout_log_probs"]
+                        else:  # Recompute old_log_probs
+                            with marked_timer("old_log_prob", timing_raw, color="blue"):
+                                old_log_prob = self._compute_old_log_prob(batch)
+                                batch = batch.union(old_log_prob)
 
-                    assert "old_log_probs" in batch.batch, f'"old_log_prob" not in {batch.batch.keys()=}'
+                        assert "old_log_probs" in batch.batch, f'"old_log_prob" not in {batch.batch.keys()=}'
 
-                    if self.use_reference_policy:
+                    if self._require_reference_log_probs():
                         # compute reference log_prob
                         with marked_timer(str(Role.RefPolicy), timing_raw, color="olive"):
                             ref_log_prob = self._compute_ref_log_prob(batch)
                             batch = batch.union(ref_log_prob)
 
                     with marked_timer("adv", timing_raw, color="brown"):
-                        # we combine with rule-based rm
                         reward_extra_infos_dict: dict[str, list]
-                        batch.batch["sample_level_scores"] = reward_tensor
-
-                        if reward_extra_infos_dict:
-                            batch.non_tensor_batch.update({k: np.array(v) for k, v in reward_extra_infos_dict.items()})
-
-                        num_timesteps = batch.batch["old_log_probs"].shape[1]
-                        batch.batch["sample_level_rewards"] = batch.batch["sample_level_scores"].expand(
-                            -1, num_timesteps
-                        )
-
-                        # compute advantages, executed on the driver process
-                        norm_adv_by_std_in_grpo = self.config.algorithm.get(
-                            "norm_adv_by_std_in_grpo", True
-                        )  # GRPO adv normalization factor
-
-                        batch = compute_advantage(
-                            batch,
-                            adv_estimator=self.config.algorithm.adv_estimator,
-                            norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
-                            global_std=self.config.algorithm.global_std,
-                            config=self.config.algorithm,
-                        )
+                        batch = self._compute_algorithm_advantage(batch, reward_tensor, reward_extra_infos_dict)
 
                     # update actor
                     with marked_timer("update_actor", timing_raw, color="red"):
@@ -1008,7 +1104,7 @@ class RayFlowGRPOTrainer:
                     # Check if the ESI (Elastic Server Instance)/training plan is close to expiration.
                     esi_close_to_expiration = should_save_ckpt_esi(
                         max_steps_duration=self.max_steps_duration,
-                        redundant_time=self.config.trainer.esi_redundant_time,
+                        redundant_time=self.config.trainer.get("esi_redundant_time", 0),
                     )
                     # Check if the conditions for saving a checkpoint are met.
                     # The conditions include a mandatory condition (1) and
@@ -1074,18 +1170,12 @@ class RayFlowGRPOTrainer:
                     }
                 )
                 # collect metrics
-                metrics.update(compute_data_metrics_diffusion(batch=batch))
+                metrics.update(self._compute_training_data_metrics(batch=batch))
                 n_gpus = self.resource_pool_manager.get_n_gpus()
-                num_images = batch.batch["advantages"].shape[0]
+                num_images = self._num_training_images(batch=batch)
                 metrics.update(compute_timing_metrics_diffusion(timing_raw=timing_raw, num_images=num_images))
                 metrics.update(compute_throughput_metrics_diffusion(batch=batch, timing_raw=timing_raw, n_gpus=n_gpus))
-                # compute variance proxy metrics
-                gradient_norm = metrics.get("actor/grad_norm", None)
-                metrics.update(compute_variance_proxy_metrics(batch=batch, gradient_norm=gradient_norm))
-
-                # this is experimental and may be changed/removed in the future in favor of a general-purpose one
-                if isinstance(self.train_dataloader.sampler, AbstractCurriculumSampler):
-                    self.train_dataloader.sampler.update(batch=batch)
+                self._update_post_training_metrics(batch, metrics)
 
                 logger.log(data=metrics, step=self.global_steps)
 
@@ -1099,8 +1189,99 @@ class RayFlowGRPOTrainer:
                     progress_bar.close()
                     return
 
-                # this is experimental and may be changed/removed in the future
-                # in favor of a general-purpose data buffer pool
-                if hasattr(self.train_dataset, "on_batch_end"):
-                    # The dataset may be changed after each training batch
-                    self.train_dataset.on_batch_end(batch=batch)
+                self._on_train_batch_end(batch=batch)
+
+
+class RayFlowGRPOTrainer(BaseRayDiffusionTrainer):
+    """Distributed Flow-GRPO trainer using Ray for scalable diffusion RL."""
+
+
+class RayDPOTrainer(BaseRayDiffusionTrainer):
+    """Distributed DPO trainer using Ray for diffusion models."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        if not self.use_reference_policy:
+            logger.warning("DPO requires a reference model. Enabling reference policy.")
+            self.use_reference_policy = True
+
+    def _rollout_repeat_times(self) -> int:
+        return self.config.actor_rollout_ref.rollout.get("k_samples", 4)
+
+    def _get_train_gen_batch(self, batch: DataProto) -> DataProto:
+        gen_batch = self._get_gen_batch(batch)
+        gen_batch.meta_info = {
+            "recompute_log_prob": False,
+            "validate": False,
+            "global_steps": self.global_steps,
+        }
+        return gen_batch
+
+    def _require_log_probs(self) -> bool:
+        # Different algorithms might be different
+        # For example, Flow-GRPO requires log probabilities, but DPO does not
+        return False
+
+    def _require_reference_log_probs(self) -> bool:
+        return self.use_reference_policy and getattr(self.config.actor_rollout_ref.actor, "use_kl_loss", False)
+
+    def _actor_mini_batch_size(self) -> int:
+        return self.config.actor_rollout_ref.actor.ppo_mini_batch_size * self._rollout_repeat_times()
+
+    def _update_actor(self, batch: DataProto) -> DataProto:
+        rollout_config = self.config.actor_rollout_ref.rollout
+        batch.meta_info["multi_turn"] = rollout_config.multi_turn.enable
+
+        batch_td = batch.to_tensordict()
+        ppo_mini_batch_size = self._actor_mini_batch_size()
+        ppo_epochs = self.config.actor_rollout_ref.actor.ppo_epochs
+        seed = self.config.actor_rollout_ref.actor.data_loader_seed
+        shuffle = self.config.actor_rollout_ref.actor.shuffle
+
+        tu.assign_non_tensor(
+            batch_td,
+            diffusion_training_mode="final_image_dpo",
+            dpo_pair_chosen_indices=batch.meta_info.get("dpo_pair_chosen_indices", np.asarray([], dtype=np.int64)),
+            dpo_pair_rejected_indices=batch.meta_info.get("dpo_pair_rejected_indices", np.asarray([], dtype=np.int64)),
+            global_batch_size=ppo_mini_batch_size,
+            mini_batch_size=ppo_mini_batch_size,
+            epochs=ppo_epochs,
+            seed=seed,
+            dataloader_kwargs={"shuffle": shuffle},
+            height=self.config.actor_rollout_ref.model.pipeline.height,
+            width=self.config.actor_rollout_ref.model.pipeline.width,
+            vae_scale_factor=self.config.actor_rollout_ref.model.get("vae_scale_factor", 8),
+        )
+
+        actor_output = self.actor_rollout_wg.update_actor(batch_td)
+        actor_output = tu.get(actor_output, "metrics")
+        actor_output = rename_dict(actor_output, "actor/")
+        return DataProto.from_single_dict(data={}, meta_info={"metrics": actor_output})
+
+    def _compute_algorithm_advantage(
+        self,
+        batch: DataProto,
+        reward_tensor: torch.Tensor,
+        reward_extra_infos_dict: dict[str, list],
+    ) -> DataProto:
+        batch.batch["sample_level_scores"] = reward_tensor
+        if reward_extra_infos_dict:
+            batch.non_tensor_batch.update({k: np.array(v) for k, v in reward_extra_infos_dict.items()})
+
+        adv_estimator = self.config.algorithm.adv_estimator
+        if adv_estimator != DiffusionAdvantageEstimator.DPO:
+            logger.warning("Expected DPO advantage estimator, got %s. Using DPO pair formation.", adv_estimator)
+
+        return compute_dpo_pair_advantage(batch, self.config.algorithm)
+
+    def _update_post_training_metrics(self, batch: DataProto, metrics: dict[str, Any]) -> None:
+        return None
+
+    def _on_train_batch_end(self, batch: DataProto) -> None:
+        return None
+
+    def _compute_training_data_metrics(self, batch: DataProto) -> dict[str, Any]:
+        return compute_reward_metrics_diffusion(batch=batch)
+
+    def _num_training_images(self, batch: DataProto) -> int:
+        return batch.batch["sample_level_scores"].shape[0]

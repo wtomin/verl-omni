@@ -13,45 +13,86 @@
 # limitations under the License.
 
 
+import torch
 from tensordict import TensorDict
 from verl.utils import tensordict_utils as tu
 from verl.utils.metric import AggregationType, Metric
 
-from verl_omni.trainer.diffusion.diffusion_algos import get_diffusion_loss_fn, kl_penalty_image
+from verl_omni.trainer.diffusion.diffusion_algos import (
+    compute_diffusion_dpo_fm_loss,
+    get_diffusion_loss_fn,
+    kl_penalty_image,
+)
 from verl_omni.workers.config import DiffusionActorConfig
 
 
 def diffusion_loss(config: DiffusionActorConfig, model_output, data: TensorDict, dp_group=None):
     """Compute loss for diffusion model"""
-    log_prob = model_output["log_probs"]
+    log_prob = model_output.get("log_probs", None)
 
     config.global_batch_info["loss_scale_factor"] = config.loss_scale_factor
 
     metrics = {}
 
     # compute policy loss
-    old_log_prob = data["old_log_probs"]
-    advantages = data["advantages"]
-
     loss_mode = config.diffusion_loss.get("loss_mode", "flow_grpo")
+    beta = getattr(config.diffusion_loss, "dpo_beta", 2000.0)
+    old_log_prob = data.get("old_log_probs", None)
+    advantages = data.get("advantages", None)
 
-    policy_loss_fn = get_diffusion_loss_fn(loss_mode)
-    policy_loss_kwargs = dict(
-        old_log_prob=old_log_prob,
-        log_prob=log_prob,
-        advantages=advantages,
-        config=config,
+    pc_raw = tu.get_non_tensor_data(data, "dpo_pair_chosen_indices", default=None)
+    pr_raw = tu.get_non_tensor_data(data, "dpo_pair_rejected_indices", default=None)
+    fm_ready = (
+        loss_mode == "dpo"
+        and model_output.get("noise_pred_theta") is not None
+        and model_output.get("noise_pred_ref") is not None
+        and data.get("fm_velocity_target", None) is not None
+        and pc_raw is not None
+        and pr_raw is not None
+        and len(pc_raw) > 0
     )
-    if loss_mode == "grpo_guard":
-        # GRPO-Guard requires the rollout-time SDE proposal mean and the per-step
-        # diffusion coefficient terms; pass them through alongside the standard inputs.
-        policy_loss_kwargs.update(
-            old_prev_sample_mean=data["old_prev_sample_mean"],
-            prev_sample_mean=model_output["prev_sample_mean"],
-            std_dev_t=model_output["std_dev_t"],
-            sqrt_dt=model_output["sqrt_dt"],
+
+    if loss_mode == "dpo":
+        if not fm_ready:
+            raise KeyError(
+                '"noise_pred_theta", "noise_pred_ref", "fm_velocity_target", and non-empty '
+                '"dpo_pair_chosen_indices"/"dpo_pair_rejected_indices" are required for DPO diffusion loss'
+            )
+        device = model_output["noise_pred_theta"].device
+        pc = torch.as_tensor(pc_raw, device=device, dtype=torch.long)
+        pr = torch.as_tensor(pr_raw, device=device, dtype=torch.long)
+        pg_loss, pg_metrics = compute_diffusion_dpo_fm_loss(
+            policy_noise_pred=model_output["noise_pred_theta"],
+            ref_noise_pred=model_output["noise_pred_ref"],
+            fm_velocity_target=data["fm_velocity_target"],
+            pair_chosen=pc,
+            pair_rejected=pr,
+            beta=beta,
         )
-    pg_loss, pg_metrics = policy_loss_fn(**policy_loss_kwargs)
+    else:
+        if advantages is None:
+            raise KeyError(f'"advantages" is required for diffusion loss mode {loss_mode!r}')
+        if log_prob is None:
+            raise KeyError(f'"log_probs" is required for diffusion loss mode {loss_mode!r}')
+        if old_log_prob is None:
+            raise KeyError(f'"old_log_probs" is required for diffusion loss mode {loss_mode!r}')
+        policy_loss_fn = get_diffusion_loss_fn(loss_mode)
+        policy_loss_kwargs = dict(
+            old_log_prob=old_log_prob,
+            log_prob=log_prob,
+            advantages=advantages,
+            config=config,
+        )
+        if loss_mode == "grpo_guard":
+            # GRPO-Guard requires the rollout-time SDE proposal mean and the per-step
+            # diffusion coefficient terms; pass them through alongside the standard inputs.
+            policy_loss_kwargs.update(
+                old_prev_sample_mean=data["old_prev_sample_mean"],
+                prev_sample_mean=model_output["prev_sample_mean"],
+                std_dev_t=model_output["std_dev_t"],
+                sqrt_dt=model_output["sqrt_dt"],
+            )
+        pg_loss, pg_metrics = policy_loss_fn(**policy_loss_kwargs)
 
     pg_metrics = Metric.from_dict(pg_metrics, aggregation=AggregationType.MEAN)
 

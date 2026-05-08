@@ -1,0 +1,109 @@
+# Model configuration for SD3 (Stable Diffusion 3.x) DPO training.
+# Aligned with diffusion_model.yaml for DiffusionModelConfig / Hydra composition.
+# Format checks enforced on CI:
+# 1. Comments must appear above each field.
+# 2. There must be a blank line between each field.
+# 3. Inline comments (after a field on the same line) are not allowed.
+# 4. Indentation level is respected for nested fields.
+
+# Target class for this configuration
+_target_: verl_omni.workers.config.diffusion.DiffusionModelConfig
+
+# Default checkpoint (SD3.5 medium); override with SD3.0 weights if desired
+path: stabilityai/stable-diffusion-3.5-medium
+
+# Model type for verl-omni diffusion stack
+model_type: diffusion_model
+
+# Must match registered pipeline name (see pipelines/sd3); avoid relying on remote model_index when set here
+architecture: StableDiffusion3Pipeline
+
+# path to the huggingface tokenizer. In case it is not the same as path
+tokenizer_path: null
+
+# whether to use shared memory for model loading
+use_shm: False
+
+# whether to trust remote code.
+trust_remote_code: False
+
+# custom chat template for the model
+custom_chat_template: "{% for message in messages %}{{ message['content'] }}{% endfor %}"
+
+# whether to use external libs for the model
+external_lib: null
+
+# whether to enable gradient checkpointing.
+enable_gradient_checkpointing: True
+
+# Set to positive value to enable LoRA (e.g., 32)
+lora_rank: 32
+
+# LoRA scaling factor
+lora_alpha: 64
+
+# Lora initialization method.
+lora_init_weights: gaussian
+
+# Target modules for LoRA adaptation
+target_modules: all-linear
+
+# Target parameters for LoRA adaptation
+target_parameters: null
+
+# Exclude modules from LoRA adaptation
+exclude_modules: null
+
+# Path to pre-trained LoRA adapter to load for continued training
+lora_adapter_path: null
+
+# MTP
+mtp:
+
+  # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+  _target_: verl.workers.config.MtpConfig
+
+  # Whether to enable MTP
+  enable: False
+
+# Pipeline configuration for diffusion model generation
+pipeline:
+
+  # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+  _target_: verl_omni.workers.config.diffusion.DiffusionPipelineConfig
+
+  # image/video height
+  height: ${oc.select:actor_rollout_ref.rollout.pipeline.height,512}
+
+  # image/video width
+  width: ${oc.select:actor_rollout_ref.rollout.pipeline.width,512}
+
+  # inference steps
+  num_inference_steps: ${oc.select:actor_rollout_ref.rollout.pipeline.num_inference_steps,40}
+
+  # Classifier-free guidance scale
+  true_cfg_scale: ${oc.select:actor_rollout_ref.rollout.pipeline.true_cfg_scale,1.0}
+
+  # Maximum text-encoder token sequence length
+  max_sequence_length: ${oc.select:actor_rollout_ref.rollout.pipeline.max_sequence_length,512}
+
+  # Distilled guidance scale
+  guidance_scale: ${oc.select:actor_rollout_ref.rollout.pipeline.guidance_scale,null}
+
+# Rollout Algorithm configuration
+algo:
+
+  # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+  _target_: verl_omni.workers.config.diffusion.DiffusionRolloutAlgoConfig
+
+  # Magnitude of SDE noise injected inside the active window
+  noise_level: ${oc.select:actor_rollout_ref.rollout.algo.noise_level,1.0}
+
+  # SDE variant: "sde" or "cps"
+  sde_type: ${oc.select:actor_rollout_ref.rollout.algo.sde_type,sde}
+
+  # Number of consecutive denoising steps in the active SDE window; null = all steps
+  sde_window_size: ${oc.select:actor_rollout_ref.rollout.algo.sde_window_size,null}
+
+  # [start, end) range for random window start-index sampling
+  sde_window_range: ${oc.select:actor_rollout_ref.rollout.algo.sde_window_range,[0,5]}

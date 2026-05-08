@@ -11,10 +11,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from . import diffusion_algos
-from .diffusion_algos import *  # noqa: F401,F403
-from .ray_diffusion_trainer import BaseRayDiffusionTrainer, RayDPOTrainer, RayFlowGRPOTrainer
+"""
+SD3 (Stable Diffusion 3.x) pipeline module for verl-omni diffusion training.
+"""
 
-# Re-export submodule for `from verl_omni.trainer.diffusion import diffusion_algos`.
-# `diffusion_algos` does not define its own `__all__`; keep this list small and stable.
-__all__ = ["BaseRayDiffusionTrainer", "RayDPOTrainer", "RayFlowGRPOTrainer", "diffusion_algos"]
+from .diffusers_training_adapter import SD3Adapter
+
+__all__ = ["SD3Adapter"]

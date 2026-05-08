@@ -83,6 +83,7 @@ class DiffusionRolloutConfig(BaseConfig):
     nnodes: int = 0
     n_gpus_per_node: int = 8
     n: int = 1
+    k_samples: int = 4
 
     prompt_length: int = 512
 

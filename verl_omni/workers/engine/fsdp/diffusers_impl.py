@@ -20,9 +20,11 @@ import json
 import logging
 import os
 import warnings
+from collections import defaultdict
 from contextlib import contextmanager, nullcontext
 from typing import Callable, Optional
 
+import numpy as np
 import torch
 import torch.distributed
 from peft import LoraConfig
@@ -59,6 +61,7 @@ from verl.workers.engine.base import BaseEngine, BaseEngineCtx, EngineRegistry
 from verl.workers.engine.fsdp.utils import create_device_mesh, get_sharding_strategy
 from verl.workers.engine.utils import enable_full_determinism, prepare_micro_batches
 
+from verl_omni.pipelines.model_base import DiffusionModelBase
 from verl_omni.pipelines.utils import build_scheduler, forward_and_sample_previous_step, prepare_model_inputs
 from verl_omni.utils.fsdp_utils import collect_lora_params
 from verl_omni.workers.config import DiffusionModelConfig
@@ -112,6 +115,7 @@ class DiffusersFSDPEngine(BaseEngine):
         self._is_offload_param = self.engine_config.param_offload
         self._is_offload_optimizer = self.engine_config.optimizer_offload
         self._is_lora = self.model_config.lora_rank > 0
+        self._final_image_dpo_components = None
 
     @property
     def is_param_offload_enabled(self) -> bool:
@@ -471,9 +475,185 @@ class DiffusersFSDPEngine(BaseEngine):
     def get_context_parallel_group(self):
         raise NotImplementedError
 
+    @staticmethod
+    def _normalize_non_tensor_scalar(value):
+        if isinstance(value, np.ndarray):
+            if value.ndim == 0:
+                return value.item()
+            if value.size == 1:
+                return value.reshape(-1)[0]
+        if isinstance(value, (list, tuple)) and len(value) == 1:
+            return value[0]
+        return value
+
+    @staticmethod
+    def _normalize_non_tensor_array(value, dtype):
+        if hasattr(value, "tolist") and not isinstance(value, np.ndarray):
+            value = value.tolist()
+        if isinstance(value, np.ndarray):
+            return value.astype(dtype, copy=False).reshape(-1)
+        if isinstance(value, (list, tuple)):
+            return np.asarray(value, dtype=dtype).reshape(-1)
+        return np.asarray([value], dtype=dtype)
+
+    def _is_final_image_dpo_batch(self, data: TensorDict) -> bool:
+        mode = tu.get_non_tensor_data(data=data, key="diffusion_training_mode", default=None)
+        return self._normalize_non_tensor_scalar(mode) == "final_image_dpo"
+
+    def _get_local_dpo_pair_indices(self, data: TensorDict) -> tuple[np.ndarray, np.ndarray]:
+        rewards = data.get("sample_level_scores", None)
+        uids = tu.get_non_tensor_data(data=data, key="uid", default=None)
+        if isinstance(rewards, torch.Tensor) and uids is not None:
+            rewards = rewards.detach()
+            if rewards.ndim > 1:
+                rewards = rewards.sum(dim=tuple(range(1, rewards.ndim)))
+            uids = self._normalize_non_tensor_array(uids, dtype=object)
+            uid_to_indices: dict[object, list[int]] = defaultdict(list)
+            for idx, uid in enumerate(uids):
+                uid_to_indices[uid].append(idx)
+
+            chosen: list[int] = []
+            rejected: list[int] = []
+            for indices in uid_to_indices.values():
+                if len(indices) < 2:
+                    continue
+                local_rewards = rewards[indices]
+                order = torch.argsort(local_rewards, descending=True)
+                chosen.append(int(indices[int(order[0].item())]))
+                rejected.append(int(indices[int(order[-1].item())]))
+            return np.asarray(chosen, dtype=np.int64), np.asarray(rejected, dtype=np.int64)
+
+        chosen = tu.get_non_tensor_data(
+            data=data, key="dpo_pair_chosen_indices", default=np.asarray([], dtype=np.int64)
+        )
+        rejected = tu.get_non_tensor_data(
+            data=data, key="dpo_pair_rejected_indices", default=np.asarray([], dtype=np.int64)
+        )
+        return (
+            self._normalize_non_tensor_array(chosen, dtype=np.int64),
+            self._normalize_non_tensor_array(rejected, dtype=np.int64),
+        )
+
+    def _get_final_image_dpo_components(self, dtype: torch.dtype):
+        model_cls = DiffusionModelBase.get_class(self.model_config)
+        build_components = getattr(model_cls, "build_final_image_dpo_components", None)
+        if build_components is None:
+            raise NotImplementedError(f"{model_cls.__name__} does not implement final-image DPO preprocessing helpers.")
+        if self._final_image_dpo_components is None:
+            self._final_image_dpo_components = build_components(
+                self.model_config,
+                device=get_device_id(),
+                dtype=dtype,
+            )
+        return self._final_image_dpo_components
+
+    def forward_final_image_dpo_step(self, micro_batch: TensorDict):
+        model_cls = DiffusionModelBase.get_class(self.model_config)
+        prepare_inputs = getattr(model_cls, "prepare_final_image_dpo_inputs", None)
+        forward_step = getattr(model_cls, "forward_final_image_dpo_step", None)
+        if prepare_inputs is None or forward_step is None:
+            raise NotImplementedError(f"{model_cls.__name__} does not support final-image DPO training.")
+
+        param = next(self.module.parameters())
+        dtype = param.dtype if param.is_floating_point() else torch.bfloat16
+        components = self._get_final_image_dpo_components(dtype)
+        model_inputs, negative_model_inputs, loss_data = prepare_inputs(
+            module=self.module,
+            scheduler=self.scheduler,
+            model_config=self.model_config,
+            components=components,
+            micro_batch=micro_batch,
+            device=get_device_id(),
+            dtype=dtype,
+        )
+
+        noise_pred_theta = forward_step(
+            module=self.module,
+            model_config=self.model_config,
+            model_inputs=model_inputs,
+            negative_model_inputs=negative_model_inputs,
+        )
+
+        ref_noise_pred = micro_batch.get("ref_noise_pred", None)
+        if ref_noise_pred is None:
+            if self._is_lora and getattr(self.module, "disable_adapters", None) is not None:
+                with torch.no_grad(), self.disable_adapter():
+                    ref_noise_pred = forward_step(
+                        module=self.module,
+                        model_config=self.model_config,
+                        model_inputs=model_inputs,
+                        negative_model_inputs=negative_model_inputs,
+                    )
+            else:
+                ref_noise_pred = noise_pred_theta.detach()
+
+        model_output = {
+            "noise_pred_theta": noise_pred_theta,
+            "noise_pred_ref": ref_noise_pred,
+        }
+        return model_output, loss_data
+
+    def forward_backward_final_image_dpo_batch(
+        self, data: TensorDict, loss_function: Callable, forward_only: bool = False
+    ) -> dict:
+        tu.assign_non_tensor(data, use_dynamic_bsz=False)
+        micro_batches, _ = prepare_micro_batches(
+            data=data, dp_group=self.get_data_parallel_group(), same_micro_num_in_dp=True
+        )
+        gradient_accumulation_steps = len(micro_batches)
+
+        losses = []
+        aggregated_metrics = {}
+        ctx = torch.no_grad() if forward_only else nullcontext()
+        with ctx:
+            for micro_batch in micro_batches:
+                micro_batch = micro_batch.to(get_device_id())
+                pair_chosen, pair_rejected = self._get_local_dpo_pair_indices(micro_batch)
+                tu.assign_non_tensor(
+                    micro_batch,
+                    gradient_accumulation_steps=gradient_accumulation_steps,
+                    dpo_pair_chosen_indices=pair_chosen,
+                    dpo_pair_rejected_indices=pair_rejected,
+                )
+
+                model_output, loss_data = self.forward_final_image_dpo_step(micro_batch)
+                for key in ("dpo_pair_chosen_indices", "dpo_pair_rejected_indices", "gradient_accumulation_steps"):
+                    val = tu.get_non_tensor_data(data=micro_batch, key=key, default=None)
+                    if val is not None:
+                        tu.assign_non_tensor(loss_data, **{key: val})
+
+                if loss_function is None:
+                    assert forward_only, "forward_only must be True when loss_function is None"
+                    loss = torch.tensor(1.0, device=get_device_id())
+                    metrics = {}
+                else:
+                    loss, metrics = loss_function(
+                        model_output=model_output,
+                        data=loss_data,
+                        dp_group=self.get_data_parallel_group(),
+                    )
+
+                if not forward_only:
+                    loss.backward()
+                losses.append(loss.detach().item())
+                append_to_dict(aggregated_metrics, metrics)
+
+        return {
+            "model_output": {},
+            "loss": losses,
+            "metrics": aggregated_metrics,
+        }
+
     def forward_backward_batch(
         self, data: TensorDict, loss_function: Callable, forward_only: bool = False
     ) -> list[TensorDict]:
+        if self._is_final_image_dpo_batch(data):
+            return self.forward_backward_final_image_dpo_batch(
+                data=data,
+                loss_function=loss_function,
+                forward_only=forward_only,
+            )
+
         num_timesteps = data["all_timesteps"].shape[1]
         tu.assign_non_tensor(data, sp_size=self.ulysses_sequence_parallel_size)
         tu.assign_non_tensor(data, use_dynamic_bsz=False)
@@ -611,7 +791,18 @@ class DiffusersFSDPEngine(BaseEngine):
             step=step,
         )
 
-    def prepare_model_outputs(self, output, micro_batch: TensorDict):
+    @staticmethod
+    def _get_loss_mode(loss_function: Optional[Callable]) -> str:
+        keywords = getattr(loss_function, "keywords", None) or {}
+        config = keywords.get("config", None)
+        diffusion_loss = getattr(config, "diffusion_loss", None)
+        if diffusion_loss is None:
+            return "flow_grpo"
+        if hasattr(diffusion_loss, "get"):
+            return diffusion_loss.get("loss_mode", "flow_grpo")
+        return getattr(diffusion_loss, "loss_mode", "flow_grpo")
+
+    def prepare_grpo_model_outputs(self, output, micro_batch: TensorDict):
         log_prob, prev_sample_mean, std_dev_t, sqrt_dt = output
         return {
             "log_probs": log_prob,
@@ -620,9 +811,31 @@ class DiffusersFSDPEngine(BaseEngine):
             "sqrt_dt": sqrt_dt,
         }
 
+    def prepare_dpo_model_outputs(self, output, micro_batch: TensorDict):
+        log_prob, prev_sample_mean, std_dev_t, noise_pred_theta = output
+        out = {
+            "log_probs": log_prob,
+            "prev_sample_mean": prev_sample_mean,
+            "std_dev_t": std_dev_t,
+            "noise_pred_theta": noise_pred_theta,
+        }
+        return out
+
+    def prepare_model_outputs(self, output, micro_batch: TensorDict, loss_mode: str = "flow_grpo"):
+        if loss_mode == "dpo":
+            return self.prepare_dpo_model_outputs(output=output, micro_batch=micro_batch)
+        return self.prepare_grpo_model_outputs(output=output, micro_batch=micro_batch)
+
+    @staticmethod
+    def _select_timestep_tensor(tensor: torch.Tensor, step: int) -> torch.Tensor:
+        if tensor.ndim >= 2:
+            step_idx = step if tensor.shape[1] > step else 0
+            return tensor[:, step_idx]
+        return tensor
+
     def forward_step(self, micro_batch: TensorDict, loss_function, forward_only, step):
         model_inputs, negative_model_inputs = self.prepare_model_inputs(micro_batch=micro_batch, step=step)
-        raw_output = forward_and_sample_previous_step(
+        raw_output_policy = forward_and_sample_previous_step(
             module=self.module,
             scheduler=self.scheduler,
             model_config=self.model_config,
@@ -631,14 +844,53 @@ class DiffusersFSDPEngine(BaseEngine):
             scheduler_inputs=micro_batch,
             step=step,
         )
-        model_output = self.prepare_model_outputs(output=raw_output, micro_batch=micro_batch)
+        loss_mode = self._get_loss_mode(loss_function)
+        noise_pred_ref = None
+        pair_chosen_np = tu.get_non_tensor_data(data=micro_batch, key="dpo_pair_chosen_indices", default=None)
+        if (
+            loss_function is not None
+            and not forward_only
+            and loss_mode == "dpo"
+            and pair_chosen_np is not None
+            and len(pair_chosen_np) > 0
+            and len(raw_output_policy) > 3
+        ):
+            if self._is_lora and getattr(self.module, "disable_adapters", None) is not None:
+                with torch.no_grad(), self.disable_adapter():
+                    raw_output_ref = forward_and_sample_previous_step(
+                        module=self.module,
+                        scheduler=self.scheduler,
+                        model_config=self.model_config,
+                        model_inputs=model_inputs,
+                        negative_model_inputs=negative_model_inputs,
+                        scheduler_inputs=micro_batch,
+                        step=step,
+                    )
+                    if len(raw_output_ref) > 3:
+                        noise_pred_ref = raw_output_ref[3]
+            else:
+                noise_pred_ref = micro_batch.get("ref_noise_pred", None)
+                if isinstance(noise_pred_ref, torch.Tensor):
+                    noise_pred_ref = noise_pred_ref[:, step] if noise_pred_ref.ndim >= 2 else noise_pred_ref
+
+        model_output = self.prepare_model_outputs(
+            output=raw_output_policy,
+            micro_batch=micro_batch,
+            loss_mode=loss_mode,
+        )
+        if noise_pred_ref is not None:
+            model_output["noise_pred_ref"] = noise_pred_ref
 
         if loss_function is not None:
-            data = tu.get_tensordict(
-                {
-                    "old_log_probs": micro_batch["old_log_probs"][:, step],
-                    "advantages": micro_batch["advantages"][:, step],
-                },
+            loss_inputs = {}
+            if micro_batch.get("old_log_probs", None) is not None:
+                loss_inputs["old_log_probs"] = self._select_timestep_tensor(micro_batch["old_log_probs"], step)
+            if micro_batch.get("advantages", None) is not None:
+                loss_inputs["advantages"] = self._select_timestep_tensor(micro_batch["advantages"], step)
+            data = (
+                tu.get_tensordict(loss_inputs)
+                if loss_inputs
+                else TensorDict({}, batch_size=micro_batch.batch_size, device=micro_batch.device)
             )
             tu.assign_non_tensor(
                 data,
@@ -649,10 +901,34 @@ class DiffusersFSDPEngine(BaseEngine):
             )
 
             if micro_batch.get("ref_log_prob", None) is not None:
-                data["ref_log_prob"] = micro_batch["ref_log_prob"][:, step]
+                data["ref_log_prob"] = self._select_timestep_tensor(micro_batch["ref_log_prob"], step)
 
             if micro_batch.get("ref_prev_sample_mean", None) is not None:
-                data["ref_prev_sample_mean"] = micro_batch["ref_prev_sample_mean"][:, step]
+                data["ref_prev_sample_mean"] = self._select_timestep_tensor(micro_batch["ref_prev_sample_mean"], step)
+
+            pair_chosen_step = tu.get_non_tensor_data(data=micro_batch, key="dpo_pair_chosen_indices", default=None)
+            for key in ("dpo_pair_chosen_indices", "dpo_pair_rejected_indices"):
+                idxs = tu.get_non_tensor_data(data=micro_batch, key=key, default=None)
+                if idxs is not None:
+                    tu.assign_non_tensor(data, **{key: idxs})
+
+            # Diffusion DPO FM gap: pairwise MSE(theta, target) − MSE(ref, target).
+            if (
+                pair_chosen_step is not None
+                and len(pair_chosen_step) > 0
+                and model_output.get("noise_pred_theta") is not None
+                and model_output.get("noise_pred_ref") is not None
+            ):
+                fm_custom = micro_batch.get("fm_velocity_target", None)
+                latents = micro_batch["all_latents"]
+                if fm_custom is None:
+                    fm_velocity_target = latents[:, 0].float().detach() - latents[:, -1].float().detach()
+                elif fm_custom.ndim >= 4 and fm_custom.shape[1] == latents.shape[1]:
+                    fm_velocity_target = fm_custom[:, step].float().detach()
+                else:
+                    fm_velocity_target = fm_custom.float().detach()
+                fm_velocity_target = fm_velocity_target.to(dtype=model_output["noise_pred_theta"].dtype)
+                data["fm_velocity_target"] = fm_velocity_target
 
             if micro_batch.get("old_prev_sample_mean", None) is not None:
                 data["old_prev_sample_mean"] = micro_batch["old_prev_sample_mean"][:, step]
