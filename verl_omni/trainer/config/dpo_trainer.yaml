@@ -1,0 +1,202 @@
+# DPO Training Configuration for SD3.5
+# Format checks enforced on CI:
+# 1. Comments must appear above each field.
+# 2. There must be a blank line between each field.
+# 3. In-line comments (after a field on the same line) are not allowed.
+# 4. Indentation level is respected for nested fields.
+
+# specify the default per-component configs
+defaults:
+
+  - diffusion/model_engine: dp_diffusion
+
+  # actor_rollout_ref.actor: trainer/config/diffusion/actor/dp_diffusion_actor.yaml
+  - diffusion/actor@actor_rollout_ref.actor: ${diffusion/model_engine}_actor
+
+  # data: trainer/config/data/legacy_data.yaml
+  - data@data: legacy_data
+
+  # Reference model config (required for DPO)
+  - diffusion/ref@actor_rollout_ref.ref: ${diffusion/model_engine}_ref
+
+  # Rollout model config
+  - diffusion/rollout@actor_rollout_ref.rollout: diffusion_rollout
+
+  # Model config for SD3.5
+  - diffusion/model@actor_rollout_ref.model: dpo_sd35_model
+
+  # Reward config (optional, for validation)
+  - reward@reward: reward
+
+  # load the reference default config, then apply the fields in the current yaml
+  # self config override anything above
+  - _self_
+
+# config for actor, rollout and reference model
+actor_rollout_ref:
+
+  # Whether it's a hybrid engine, currently only supports hybrid engine
+  hybrid_engine: true
+
+  # Model config
+  model:
+
+    # Select diffusion model type
+    model_type: "diffusion_model"
+
+    # SD3.5 model path
+    path: "stabilityai/stable-diffusion-3.5-medium"
+
+    # Pipeline type (must match registered name in DiffusionModelBase)
+    architecture: "StableDiffusion3Pipeline"
+
+    # LoRA configuration for DPO
+    lora:
+      rank: 32
+      alpha: 64
+      enable: true
+
+    # Pipeline settings
+    pipeline:
+      height: 512
+      width: 512
+      num_inference_steps: 40
+      guidance_scale: 1.0
+      true_cfg_scale: 1.0
+
+# config for the DPO algorithm
+algorithm:
+
+  # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+  _target_: verl_omni.trainer.config.DiffusionAlgoConfig
+
+  # Advantage estimator type: "dpo"
+  adv_estimator: dpo
+
+  # DPO beta parameter (temperature)
+  dpo_beta: 100.0
+
+  # Whether to normalize advantages by std
+  norm_adv_by_std_in_grpo: false
+
+  # Whether to use global std for advantage normalization
+  global_std: false
+
+  # Whether to bypass old log-prob recomputation
+  bypass_mode: false
+
+# config for the trainer
+trainer:
+
+  # Number of epochs in training
+  total_epochs: 30
+
+  # Total training steps (can be set explicitly or derived from epochs)
+  total_training_steps: null
+
+  # Project name for experiment tracking (e.g., wandb)
+  project_name: verl_dpo_examples
+
+  # Experiment name for run identification
+  experiment_name: sd35_dpo
+
+  # Logging backends to use: "console", "wandb", etc.
+  logger: ["console"]
+
+  # Number of generations to log during validation
+  log_val_generations: 0
+
+  # Directory for logging rollout data; no dump if null
+  rollout_data_dir: null
+
+  # Directory for logging validation data; no dump if null
+  validation_data_dir: null
+
+  # Number of nodes used in the training
+  nnodes: 1
+
+  # Number of GPUs per node
+  n_gpus_per_node: 1
+
+  # Save frequency (by iteration) for model checkpoints
+  save_freq: 10
+
+  # Resume mode: "auto", "disable", or "resume_path"
+  resume_mode: auto
+
+  # Path to resume training from (only used when resume_mode is "resume_path")
+  resume_from_path: null
+
+  # Whether to run validation before training begins
+  val_before_train: true
+
+  # Whether to run validation only
+  val_only: false
+
+  # Validation frequency (in training iterations)
+  test_freq: 10
+
+  # Default path to distributed filesystem for saving checkpoints
+  default_hdfs_dir: null
+
+  # Whether to delete local checkpoints after loading
+  del_local_ckpt_after_load: false
+
+  # Default local directory for saving checkpoints
+  default_local_dir: checkpoints/${trainer.project_name}/${trainer.experiment_name}
+
+  # Timeout (in seconds) for Ray worker to wait for registration
+  ray_wait_register_center_timeout: 300
+
+  # Device to run training on (e.g., "cuda", "cpu")
+  device: cuda
+
+# configs related to ray
+ray_kwargs:
+
+  # configs related to ray initialization
+  ray_init:
+
+    # Number of CPUs for Ray. Use a fixed number instead of null when using SLURM.
+    num_cpus: null
+
+    # Path to save Ray timeline JSON for performance profiling
+    timeline_json_file: null
+
+# data configuration
+data:
+
+  # Training data files (prompts for DPO)
+  train_files: dataset/pickscore/train.jsonl
+
+  # Validation data files
+  val_files: dataset/pickscore/val.jsonl
+
+  # Batch size for generation (number of unique prompts per batch)
+  gen_batch_size: 24
+
+  # Batch size for training
+  train_batch_size: 24
+
+  # Number of K-repeated samples per prompt (for DPO pair formation)
+  k_samples: 4
+
+  # Data loader number of workers
+  dataloader_num_workers: 0
+
+  # Maximum number of training samples
+  train_max_samples: 1024
+
+  # Maximum number of validation samples
+  val_max_samples: 100
+
+# reward configuration (for validation)
+reward:
+
+  # Whether to use reward model
+  enable: false
+
+  # Reward model configuration
+  reward_model:
+    enable: false
+    model_path: "yuvalkirstain/PickScore_v1"

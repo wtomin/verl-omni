@@ -77,7 +77,7 @@ def main():
             "'Last updated: mm/dd/yyyy' to indicate the last update time of the document."
         )
     else:
-        print("✅ All checked files contain 'Last updated'.")
+        print("OK: All checked files contain 'Last updated'.")
 
 
 if __name__ == "__main__":

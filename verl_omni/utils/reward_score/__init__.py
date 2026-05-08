@@ -14,6 +14,8 @@
 
 """Visual (image) reward scoring functions for VeRL-Omni."""
 
+from . import pick_score
+
 
 def default_compute_score_image(
     data_source,
@@ -43,6 +45,14 @@ def default_compute_score_image(
         from . import jpeg_compressibility
 
         res = jpeg_compressibility.compute_score(solution_image)
+    elif data_source == "pick_score":
+        res = pick_score.compute_pickscore_reward(
+            data_source=data_source,
+            solution_image=solution_image,
+            ground_truth=ground_truth,
+            extra_info=extra_info,
+            **kwargs,
+        )
     else:
         raise NotImplementedError(f"Reward function is not implemented for {data_source=}")
 
@@ -54,4 +64,4 @@ def default_compute_score_image(
         return float(res[0])
 
 
-__all__ = ["default_compute_score_image"]
+__all__ = ["default_compute_score_image", "pick_score"]

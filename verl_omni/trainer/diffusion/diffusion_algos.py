@@ -74,6 +74,7 @@ class DiffusionAdvantageEstimator(str, Enum):
     """Advantage estimators specific to diffusion-based training."""
 
     FLOW_GRPO = "flow_grpo"
+    DPO = "dpo"
 
 
 DIFFUSION_ADV_ESTIMATOR_REGISTRY: dict[str, Any] = {}
@@ -254,3 +255,149 @@ def kl_penalty_image(
     """
     kl_loss = ((prev_sample_mean - ref_prev_sample_mean) ** 2).mean(dim=(1, 2), keepdim=True) / (2 * std_dev_t**2)
     return kl_loss.mean()
+
+
+@register_diffusion_adv_est(DiffusionAdvantageEstimator.DPO)
+def compute_dpo_advantage(
+    sample_level_rewards: torch.Tensor,
+    index: np.ndarray,
+    epsilon: float = 1e-4,
+    norm_adv_by_std_in_grpo: bool = True,
+    global_std: bool = True,
+    config: Optional[DictConfig] = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Compute advantage for DPO training.
+    DPO works with paired data (chosen/rejected), so we need to form pairs
+    and compute advantages within each group.
+
+    Args:
+        sample_level_rewards: `(torch.Tensor)`
+            shape is (bs, response_length). For DPO, response_length should be 1
+            since each sample has a single reward.
+        index: `(np.ndarray)`
+            index array for grouping (same prompt has same index).
+        epsilon: `(float)`
+            small value to avoid division by zero.
+        norm_adv_by_std_in_grpo: `(bool)`
+            whether to scale the advantage by std (similar to GRPO).
+        global_std: `(bool)`
+            whether to use global std for advantage normalization.
+        config: `(Optional[DictConfig])`
+            algorithm configuration object, may contain DPO-specific parameters.
+
+    Returns:
+        advantages: `(torch.Tensor)`
+            shape is (bs, response_length). For DPO, this is the advantage
+            computed within each group (prompt).
+        returns: `(torch.Tensor)`
+            shape is (bs, response_length). Same as advantages for DPO.
+    """
+    scores = sample_level_rewards.clone()
+    assert scores.ndim == 2
+    # For DPO, we expect response_length = 1 (one reward per sample)
+    # But we'll handle the general case
+
+    id2score = defaultdict(list)
+    id2mean = {}
+    id2std = {}
+
+    with torch.no_grad():
+        if global_std:
+            batch_std = torch.std(scores)
+        else:
+            batch_std = None
+
+        bsz = scores.shape[0]
+        for i in range(bsz):
+            id2score[index[i]].append(scores[i])
+        for idx in id2score:
+            if len(id2score[idx]) == 1:
+                id2mean[idx] = id2score[idx][0]
+                if global_std:
+                    id2std[idx] = batch_std
+                else:
+                    id2std[idx] = torch.tensor(1.0)
+            elif len(id2score[idx]) > 1:
+                scores_tensor = torch.stack(id2score[idx])
+                id2mean[idx] = torch.mean(scores_tensor)
+                if global_std:
+                    id2std[idx] = batch_std
+                else:
+                    id2std[idx] = torch.std(scores_tensor)
+            else:
+                raise ValueError(f"no score in prompt index: {idx}")
+        for i in range(bsz):
+            if norm_adv_by_std_in_grpo:
+                scores[i] = (scores[i] - id2mean[index[i]]) / (id2std[index[i]] + epsilon)
+            else:
+                scores[i] = scores[i] - id2mean[index[i]]
+
+    return scores, scores
+
+
+@register_diffusion_loss("dpo")
+def compute_diffusion_loss_dpo(
+    old_log_prob: torch.Tensor,
+    log_prob: torch.Tensor,
+    advantages: torch.Tensor,
+    config: Optional[DictConfig | DiffusionActorConfig] = None,
+) -> tuple[torch.Tensor, dict[str, Any]]:
+    """Compute the DPO loss for diffusion models.
+
+    The DPO loss is based on the paper "Your Diffusion Model is Secretly a
+    Contrastive Reward Model" (https://arxiv.org/abs/2309.17411).
+
+    For diffusion DPO, the loss is:
+        L = -log σ(-β/2 * ((θ_w_err - ref_w_err) - (θ_l_err - ref_l_err)))
+    where err = MSE(noise_pred, noise - x_0) averaged over spatial dims.
+
+    However, in the verl-omni implementation, we use a simplified version
+    that works with pre-computed advantages.
+
+    Args:
+        old_log_prob (torch.Tensor):
+            Not used in DPO (kept for API compatibility), shape (batch_size,).
+        log_prob (torch.Tensor):
+            Not used in DPO (kept for API compatibility), shape (batch_size,).
+        advantages (torch.Tensor):
+            Advantage estimates for each sample, shape (batch_size,).
+            For DPO, this should be the implicit reward difference.
+        config (verl_omni.workers.config.DiffusionActorConfig):
+            Config for the actor. May contain DPO-specific parameters.
+
+    Returns:
+        tuple[torch.Tensor, dict[str, Any]]:
+            The DPO loss and metrics dictionary.
+    """
+    assert config is not None
+
+    # For DPO, the advantages tensor should contain the implicit reward
+    # differences: (reward_chosen - reward_rejected) for each pair
+    # The loss is then: -log sigmoid(β * advantages)
+
+    beta = getattr(config.diffusion_loss, "dpo_beta", 100.0)
+
+    # The advantages should already be computed as:
+    # advantages = implicit_reward_chosen - implicit_reward_rejected
+    # where implicit_reward = -0.5 * β * (policy_err - ref_err)
+
+    # DPO loss: L = -log σ(β * advantages)
+    dpo_loss = -torch.nn.functional.logsigmoid(beta * advantages).mean()
+
+    # Compute metrics
+    with torch.no_grad():
+        implicit_rewards = advantages
+        mean_reward = implicit_rewards.mean()
+        std_reward = implicit_rewards.std()
+        # Accuracy: fraction where implicit_reward > 0 (chosen > rejected)
+        accuracy = (implicit_rewards > 0).float().mean()
+
+    dpo_metrics = {
+        "actor/dpo_loss": dpo_loss.detach().item(),
+        "actor/mean_implicit_reward": mean_reward.detach().item(),
+        "actor/std_implicit_reward": std_reward.detach().item(),
+        "actor/dpo_accuracy": accuracy.detach().item(),
+    }
+
+    return dpo_loss, dpo_metrics
