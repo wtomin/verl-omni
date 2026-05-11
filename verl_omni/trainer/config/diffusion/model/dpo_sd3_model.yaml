@@ -49,6 +49,3 @@ pipeline:
   guidance_scale: 1.0
 
   true_cfg_scale: 1.0
-
-# Trust remote code (may be needed for some models)
-trust_remote_code: false
