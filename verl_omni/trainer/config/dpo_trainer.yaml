@@ -13,8 +13,8 @@ defaults:
   # actor_rollout_ref.actor: trainer/config/diffusion/actor/dp_diffusion_actor.yaml
   - diffusion/actor@actor_rollout_ref.actor: ${diffusion/model_engine}_actor
 
-  # data: trainer/config/data/legacy_data.yaml
-  - data@data: legacy_data
+  # data: trainer/config/data/prompt_txt_data.yaml (one UTF-8 prompt per line in .txt)
+  - data@data: prompt_txt_data
 
   # Reference model config (required for DPO)
   - diffusion/ref@actor_rollout_ref.ref: ${diffusion/model_engine}_ref
@@ -175,17 +175,17 @@ ray_kwargs:
 # data configuration
 data:
 
-  # Training data files (prompts for DPO)
-  train_files: dataset/pickscore/train.jsonl
+  # Training data files (prompts for DPO; PromptTxtRLDataset expects .txt, one prompt per line)
+  train_files: dataset/pickscore/train.txt
 
   # Validation data files
-  val_files: dataset/pickscore/val.jsonl
+  val_files: dataset/pickscore/test.txt
 
   # Batch size for generation (number of unique prompts per batch)
-  gen_batch_size: 24
+  gen_batch_size: 4
 
   # Batch size for training
-  train_batch_size: 24
+  train_batch_size: 4
 
   # Number of K-repeated samples per prompt (for DPO pair formation)
   k_samples: 4
@@ -199,13 +199,13 @@ data:
   # Maximum number of validation samples
   val_max_samples: 100
 
-# reward configuration (for validation)
+# reward configuration (PickScore for training / validation scoring)
 reward:
 
   # Whether to use reward model
-  enable: false
+  enable: true
 
   # Reward model configuration
   reward_model:
-    enable: false
+    enable: true
     model_path: "yuvalkirstain/PickScore_v1"
