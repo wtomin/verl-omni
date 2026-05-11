@@ -11,8 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from . import algorithm
-from .algorithm import *  # noqa: F401,F403
+from .diffusion_algos import *  # noqa: F401,F403
 from .ray_dpo_trainer import RayDPOTrainer
 
-__all__ = list(algorithm.__all__) + ["RayDPOTrainer"]
+__all__ = list(diffusion_algos.__all__) + ["RayDPOTrainer"]
