@@ -1,0 +1,46 @@
+# Plain-text prompts for RLHF / diffusion training (one UTF-8 line per sample).
+#
+# Usage:
+#
+#   defaults:
+#     - data@data: prompt_txt_data
+#
+# CLI overrides:
+#
+#   data.train_files=/path/to/train.txt data.val_files=/path/to/test.txt
+#
+# Optional ``data`` fields interpreted by ``PromptTxtRLDataset`` / ``build_prompt_txt_row``:
+#
+# - txt_system_prompt
+#
+# - txt_negative_user_content
+#
+# - txt_user_only_negative_content
+#
+# - txt_default_data_source
+#
+# - txt_reward_style
+#
+# - txt_reward_ground_truth
+
+# Merge base RLHF / diffusion data defaults before applying fields below
+defaults:
+
+  - legacy_data
+
+  - _self_
+
+# Hydra dynamic import target (see verl ``load_extern_object``)
+custom_cls:
+
+  # pkg:// or file:// module URI understood by verl
+  path: pkg://verl_omni.utils.dataset.prompt_txt_rl_dataset
+
+  # Dataset class registered in that module
+  name: PromptTxtRLDataset
+
+# Training shards (``.txt``, one stripped non-empty line per prompt)
+train_files: dataset/pickscore/train.txt
+
+# Validation shards (``.txt``)
+val_files: dataset/pickscore/test.txt
