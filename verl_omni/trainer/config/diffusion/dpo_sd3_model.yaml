@@ -8,7 +8,7 @@ path: "stabilityai/stable-diffusion-3.5-medium"
 model_type: "diffusion_model"
 
 # Architecture name must match registered name in DiffusionModelBase
-# "StableDiffusion3Pipeline" is registered in pipelines/sd3/diffusers_training_adapter.py
+# "StableDiffusion3Pipeline" is registered in pipelines/sd3_dpo/diffusers_training_adapter.py
 architecture: "StableDiffusion3Pipeline"
 
 # Local path for downloaded model (optional)
