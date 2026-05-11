@@ -12,10 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from . import (  # noqa: F401
-    qwen_image_flow_grpo,
-    sd3,
-)
 from .qwen_image_flow_grpo import *  # noqa: F401, F403
 from .sd3 import *  # noqa: F401, F403
 
