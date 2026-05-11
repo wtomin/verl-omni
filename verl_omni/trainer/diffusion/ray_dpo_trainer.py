@@ -534,28 +534,46 @@ class RayDPOTrainer:
                         timing_raw.update(gen_batch_output.meta_info.get("timing", {}))
                         gen_batch_output.meta_info.pop("timing", None)
 
-                    # Form pairs and compute rewards
+                    rollout_batch = gen_batch.union(gen_batch_output)
+
+                    # Form pairs and compute rewards (requires merged rollout tensors)
                     with marked_timer("reward", timing_raw, color="yellow"):
-                        if self.use_rm and "rm_scores" not in batch.batch.keys():
-                            batch_reward = self._compute_reward_colocate(batch)
-                            batch = batch.union(batch_reward)
+                        if self.use_rm and "rm_scores" not in rollout_batch.batch.keys():
+                            batch_reward = self._compute_reward_colocate(rollout_batch)
+                            rollout_batch = rollout_batch.union(batch_reward)
 
-                        # Extract rewards and form DPO pairs
-                        reward_tensor, reward_extra_infos_dict = extract_reward(batch)
+                        reward_tensor, reward_extra_infos_dict = extract_reward(rollout_batch)
 
-                    # Compute DPO advantages (implicit rewards)
+                    rollout_batch.batch["sample_level_scores"] = reward_tensor
+
+                    if reward_extra_infos_dict:
+                        rollout_batch.non_tensor_batch.update(
+                            {k: np.array(v) for k, v in reward_extra_infos_dict.items()}
+                        )
+
+                    bypass_recomputing_logprobs = self.config.algorithm.get("bypass_mode", False)
+                    if bypass_recomputing_logprobs:
+                        assert "rollout_log_probs" in rollout_batch.batch, (
+                            "bypass_mode requires rollout batch log_probs."
+                        )
+                        rollout_batch.batch["old_log_probs"] = rollout_batch.batch["rollout_log_probs"]
+                    else:
+                        with marked_timer("old_log_prob", timing_raw, color="blue"):
+                            old_log_prob = self._compute_old_log_prob(rollout_batch)
+                            rollout_batch = rollout_batch.union(old_log_prob)
+
+                    if self.use_reference_policy:
+                        with marked_timer(str(Role.RefPolicy), timing_raw, color="olive"):
+                            ref_log_prob = self._compute_ref_log_prob(rollout_batch)
+                            rollout_batch = rollout_batch.union(ref_log_prob)
+
+                    # Compute DPO pairs (preference indices carried in meta_info for FM loss).
                     with marked_timer("adv", timing_raw, color="brown"):
-                        batch.batch["sample_level_scores"] = reward_tensor
-
-                        if reward_extra_infos_dict:
-                            batch.non_tensor_batch.update({k: np.array(v) for k, v in reward_extra_infos_dict.items()})
-
-                        # Compute advantages for DPO
-                        batch = self._compute_dpo_advantages(batch)
+                        rollout_batch = self._compute_dpo_advantages(rollout_batch)
 
                     # Update actor using DPO loss
                     with marked_timer("update_actor", timing_raw, color="red"):
-                        actor_output = self._update_actor(batch)
+                        actor_output = self._update_actor(rollout_batch)
 
                     # Checkpoint saving
                     is_last_step = self.global_steps >= self.total_training_steps
@@ -592,7 +610,7 @@ class RayDPOTrainer:
                             metrics.update(val_metrics)
 
                 # Collect metrics
-                self._collect_training_metrics(batch, timing_raw, metrics, epoch)
+                self._collect_training_metrics(rollout_batch, timing_raw, metrics, epoch)
 
                 logger.log(data=metrics, step=self.global_steps)
                 progress_bar.update(1)
@@ -693,16 +711,17 @@ class RayDPOTrainer:
 
 def compute_dpo_advantage(
     data: DataProto,
-    config: Optional[DiffusionAlgoConfig] = None,
+    _config: Optional[DiffusionAlgoConfig] = None,
 ) -> DataProto:
-    """Compute DPO advantage (implicit reward difference).
+    """Form chosen/rejected preference pairs per prompt UID for diffusion FM-DPO training.
 
-    Args:
-        data: DataProto containing batch with rewards and group information.
-        config: Algorithm configuration.
+    Pair indices live in ``data.meta_info`` and are threaded through ``DataProto.to_tensordict()``
+    so the actor can assemble the contrastive logistic loss::
 
-    Returns:
-        DataProto with computed advantages and returns.
+        `-log σ( -β/2 * ( (θ_w^mse − ref_w^mse) − (θ_l^mse − ref_l^mse) ) )`.
+
+    The ``advantages`` tensor stays zero when the pairwise FM loss runs (reward is still used only
+    to decide which rollout is chosen vs rejected).
     """
     # Get rewards and uids
     rewards = data.batch["sample_level_scores"].sum(-1)  # (batch_size,)
@@ -716,30 +735,37 @@ def compute_dpo_advantage(
     for i, uid in enumerate(uids):
         uid_to_indices[uid].append(i)
 
-    # Compute implicit rewards (simplified: use actual rewards)
-    # In full DPO, implicit reward = -0.5 * beta * (policy_err - ref_err)
-    # For simplicity, we use the actual rewards as implicit rewards
-    beta = getattr(config, "dpo_beta", 100.0)
-
     advantages = torch.zeros_like(rewards)
     returns = torch.zeros_like(rewards)
 
-    for uid, indices in uid_to_indices.items():
+    pair_chosen: list[int] = []
+    pair_rejected: list[int] = []
+
+    for _uid, indices in uid_to_indices.items():
         if len(indices) < 2:
             continue
 
         group_rewards = rewards[indices]
         # Form pairs: highest vs lowest reward in group
         sorted_indices = torch.argsort(group_rewards, descending=True)
-        chosen_idx = indices[sorted_indices[0]]
-        rejected_idx = indices[sorted_indices[-1]]
+        si0 = int(sorted_indices[0].item())
+        si_last = int(sorted_indices[-1].item())
+        chosen_idx = int(indices[si0])
+        rejected_idx = int(indices[si_last])
+        pair_chosen.append(chosen_idx)
+        pair_rejected.append(rejected_idx)
 
-        # Advantage = implicit_reward_chosen - implicit_reward_rejected
-        # For DPO, we use the actual rewards as a proxy
-        advantages[chosen_idx] = (group_rewards[sorted_indices[0]] - group_rewards[sorted_indices[-1]]) * beta / 100.0
-        advantages[rejected_idx] = -advantages[chosen_idx]
+    data.meta_info["dpo_pair_chosen_indices"] = np.asarray(pair_chosen, dtype=np.int64)
+    data.meta_info["dpo_pair_rejected_indices"] = np.asarray(pair_rejected, dtype=np.int64)
 
-    data.batch["advantages"] = advantages.unsqueeze(-1)
-    data.batch["returns"] = returns.unsqueeze(-1)
+    adv_cols = advantages.unsqueeze(-1)
+    ret_cols = returns.unsqueeze(-1)
+    if "old_log_probs" in data.batch.keys():
+        num_t = data.batch["old_log_probs"].shape[1]
+        adv_cols = adv_cols.expand(-1, num_t)
+        ret_cols = ret_cols.expand(-1, num_t)
+
+    data.batch["advantages"] = adv_cols
+    data.batch["returns"] = ret_cols
 
     return data

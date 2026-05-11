@@ -13,11 +13,16 @@
 # limitations under the License.
 
 
+import torch
 from tensordict import TensorDict
 from verl.utils import tensordict_utils as tu
 from verl.utils.metric import AggregationType, Metric
 
-from verl_omni.trainer.diffusion.diffusion_algos import get_diffusion_loss_fn, kl_penalty_image
+from verl_omni.trainer.diffusion.diffusion_algos import (
+    compute_diffusion_dpo_fm_loss,
+    get_diffusion_loss_fn,
+    kl_penalty_image,
+)
 from verl_omni.workers.config import DiffusionActorConfig
 
 
@@ -34,14 +39,40 @@ def diffusion_loss(config: DiffusionActorConfig, model_output, data: TensorDict,
     advantages = data["advantages"]
 
     loss_mode = config.diffusion_loss.get("loss_mode", "flow_grpo")
+    beta = getattr(config.diffusion_loss, "dpo_beta", 100.0)
 
-    policy_loss_fn = get_diffusion_loss_fn(loss_mode)
-    pg_loss, pg_metrics = policy_loss_fn(
-        old_log_prob=old_log_prob,
-        log_prob=log_prob,
-        advantages=advantages,
-        config=config,
+    pc_raw = tu.get_non_tensor_data(data, "dpo_pair_chosen_indices", default=None)
+    pr_raw = tu.get_non_tensor_data(data, "dpo_pair_rejected_indices", default=None)
+    fm_ready = (
+        loss_mode == "dpo"
+        and model_output.get("noise_pred_theta") is not None
+        and model_output.get("noise_pred_ref") is not None
+        and data.get("fm_velocity_target", None) is not None
+        and pc_raw is not None
+        and pr_raw is not None
+        and len(pc_raw) > 0
     )
+
+    if fm_ready:
+        device = advantages.device
+        pc = torch.as_tensor(pc_raw, device=device, dtype=torch.long)
+        pr = torch.as_tensor(pr_raw, device=device, dtype=torch.long)
+        pg_loss, pg_metrics = compute_diffusion_dpo_fm_loss(
+            policy_noise_pred=model_output["noise_pred_theta"],
+            ref_noise_pred=model_output["noise_pred_ref"],
+            fm_velocity_target=data["fm_velocity_target"],
+            pair_chosen=pc,
+            pair_rejected=pr,
+            beta=beta,
+        )
+    else:
+        policy_loss_fn = get_diffusion_loss_fn(loss_mode)
+        pg_loss, pg_metrics = policy_loss_fn(
+            old_log_prob=old_log_prob,
+            log_prob=log_prob,
+            advantages=advantages,
+            config=config,
+        )
 
     pg_metrics = Metric.from_dict(pg_metrics, aggregation=AggregationType.MEAN)
 

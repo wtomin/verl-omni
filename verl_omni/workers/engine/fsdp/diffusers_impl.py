@@ -554,16 +554,19 @@ class DiffusersFSDPEngine(BaseEngine):
         )
 
     def prepare_model_outputs(self, output, micro_batch: TensorDict):
-        log_prob, prev_sample_mean, std_dev_t = output
-        return {
+        log_prob, prev_sample_mean, std_dev_t = output[0], output[1], output[2]
+        out = {
             "log_probs": log_prob,
             "prev_sample_mean": prev_sample_mean,
             "std_dev_t": std_dev_t,
         }
+        if len(output) > 3:
+            out["noise_pred_theta"] = output[3]
+        return out
 
     def forward_step(self, micro_batch: TensorDict, loss_function, forward_only, step):
         model_inputs, negative_model_inputs = self.prepare_model_inputs(micro_batch=micro_batch, step=step)
-        raw_output = forward_and_sample_previous_step(
+        raw_output_policy = forward_and_sample_previous_step(
             module=self.module,
             scheduler=self.scheduler,
             model_config=self.model_config,
@@ -572,7 +575,36 @@ class DiffusersFSDPEngine(BaseEngine):
             scheduler_inputs=micro_batch,
             step=step,
         )
-        model_output = self.prepare_model_outputs(output=raw_output, micro_batch=micro_batch)
+        noise_pred_ref = None
+        pair_chosen_np = tu.get_non_tensor_data(data=micro_batch, key="dpo_pair_chosen_indices", default=None)
+        if (
+            loss_function is not None
+            and not forward_only
+            and pair_chosen_np is not None
+            and len(pair_chosen_np) > 0
+            and len(raw_output_policy) > 3
+        ):
+            if self._is_lora and getattr(self.module, "disable_adapters", None) is not None:
+                with torch.no_grad(), self.disable_adapter():
+                    raw_output_ref = forward_and_sample_previous_step(
+                        module=self.module,
+                        scheduler=self.scheduler,
+                        model_config=self.model_config,
+                        model_inputs=model_inputs,
+                        negative_model_inputs=negative_model_inputs,
+                        scheduler_inputs=micro_batch,
+                        step=step,
+                    )
+                    if len(raw_output_ref) > 3:
+                        noise_pred_ref = raw_output_ref[3]
+            else:
+                noise_pred_ref = micro_batch.get("ref_noise_pred", None)
+                if isinstance(noise_pred_ref, torch.Tensor):
+                    noise_pred_ref = noise_pred_ref[:, step] if noise_pred_ref.ndim >= 2 else noise_pred_ref
+
+        model_output = self.prepare_model_outputs(output=raw_output_policy, micro_batch=micro_batch)
+        if noise_pred_ref is not None:
+            model_output["noise_pred_ref"] = noise_pred_ref
 
         if loss_function is not None:
             data = tu.get_tensordict(
@@ -593,6 +625,30 @@ class DiffusersFSDPEngine(BaseEngine):
 
             if micro_batch.get("ref_prev_sample_mean", None) is not None:
                 data["ref_prev_sample_mean"] = micro_batch["ref_prev_sample_mean"][:, step]
+
+            pair_chosen_step = tu.get_non_tensor_data(data=micro_batch, key="dpo_pair_chosen_indices", default=None)
+            for key in ("dpo_pair_chosen_indices", "dpo_pair_rejected_indices"):
+                idxs = tu.get_non_tensor_data(data=micro_batch, key=key, default=None)
+                if idxs is not None:
+                    tu.assign_non_tensor(data, **{key: idxs})
+
+            # Diffusion DPO FM gap: pairwise MSE(theta, target) − MSE(ref, target).
+            if (
+                pair_chosen_step is not None
+                and len(pair_chosen_step) > 0
+                and model_output.get("noise_pred_theta") is not None
+                and model_output.get("noise_pred_ref") is not None
+            ):
+                fm_custom = micro_batch.get("fm_velocity_target", None)
+                latents = micro_batch["all_latents"]
+                if fm_custom is None:
+                    fm_velocity_target = latents[:, 0].float().detach() - latents[:, -1].float().detach()
+                elif fm_custom.ndim >= 4 and fm_custom.shape[1] == latents.shape[1]:
+                    fm_velocity_target = fm_custom[:, step].float().detach()
+                else:
+                    fm_velocity_target = fm_custom.float().detach()
+                fm_velocity_target = fm_velocity_target.to(dtype=model_output["noise_pred_theta"].dtype)
+                data["fm_velocity_target"] = fm_velocity_target
 
             loss, metrics = loss_function(model_output=model_output, data=data, dp_group=self.get_data_parallel_group())
         else:

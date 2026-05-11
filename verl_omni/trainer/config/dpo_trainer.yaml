@@ -35,6 +35,15 @@ defaults:
 # config for actor, rollout and reference model
 actor_rollout_ref:
 
+  # Explicit FM-DPO loss (pairwise logistic on flow-matching MSE gaps vs reference policy).
+  actor:
+
+    diffusion_loss:
+
+      loss_mode: dpo
+
+      dpo_beta: 100.0
+
   # Whether it's a hybrid engine, currently only supports hybrid engine
   hybrid_engine: true
 

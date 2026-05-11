@@ -184,7 +184,8 @@ class SD3Adapter(DiffusionModelBase):
             step (int): Current denoising step index.
 
         Returns:
-            tuple: A 3-tuple of ``(log_prob, prev_sample_mean, std_dev_t)``.
+            tuple: ``(log_prob, prev_sample_mean, std_dev_t, noise_pred)`` where ``noise_pred`` is the
+            (CFG-combined) transformer velocity output at this step.
         """
         assert scheduler_inputs is not None
         latents = scheduler_inputs["all_latents"]
@@ -210,4 +211,4 @@ class SD3Adapter(DiffusionModelBase):
             sde_type=sde_type,
             return_logprobs=True,
         )
-        return log_prob, prev_sample_mean, std_dev_t
+        return log_prob, prev_sample_mean, std_dev_t, noise_pred

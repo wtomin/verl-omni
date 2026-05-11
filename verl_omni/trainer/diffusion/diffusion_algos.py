@@ -336,6 +336,83 @@ def compute_dpo_advantage(
     return scores, scores
 
 
+def _spatial_mse_per_sample(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    """Channel/spatial mean squared error, one scalar per batch row."""
+    if pred.shape != target.shape:
+        raise ValueError(f"Mismatched shapes for FM DPO tensors: pred {pred.shape}, target {target.shape}")
+    if pred.ndim <= 1:
+        return (pred.float() - target.float()).square()
+    spatial_dims = tuple(range(1, pred.ndim))
+    return (pred.float() - target.float()).square().mean(dim=spatial_dims)
+
+
+def compute_diffusion_dpo_fm_loss(
+    policy_noise_pred: torch.Tensor,
+    ref_noise_pred: torch.Tensor,
+    fm_velocity_target: torch.Tensor,
+    pair_chosen: torch.Tensor,
+    pair_rejected: torch.Tensor,
+    beta: float,
+) -> tuple[torch.Tensor, dict[str, Any]]:
+    """Explicit diffusion DPO objective from pairwise flow-matching MSE gaps.
+
+    Matches the logits-free loss used when comparing policy vs reference predictions
+    to a velocity target ``noise - x_0`` (see diffusion DPO / contrastive reward literature).
+
+    Loss (one term per preference pair):
+
+        ``L = mean( -log σ( -β/2 * ( w_diff - l_diff ) ) )``
+
+    where::
+
+        ``w_diff = θ_err_w - ref_err_w``, ``l_diff = θ_err_l - ref_err_l``
+
+    and θ_err denotes per-sample FM MSE ``mean((pred - target)²)`` over spatial dimensions.
+
+    Args:
+        policy_noise_pred: Policy (θ) transformer output velocity prediction, batched like training rollout.
+        ref_noise_pred: Reference velocity prediction from the frozen base weights.
+        fm_velocity_target: Regression target aligned with ``policy_noise_pred`` (e.g. ``noise - x_0``).
+        pair_chosen: Long indices ``(num_pairs,)`` into batch dimension for preferred samples ``w``.
+        pair_rejected: Long indices ``(num_pairs,)`` into batch dimension for dispreferred samples ``l``.
+        beta: Temperature from DPO preference strength.
+
+    Returns:
+        Scalar loss tensor and a metrics dictionary.
+    """
+    if pair_chosen.numel() == 0:
+        return policy_noise_pred.sum() * 0.0, {"actor/dpo_loss": 0.0, "actor/dpo_accuracy": 0.0}
+
+    theta_err = _spatial_mse_per_sample(policy_noise_pred, fm_velocity_target)
+    ref_err = _spatial_mse_per_sample(ref_noise_pred.detach(), fm_velocity_target)
+
+    theta_w_err = theta_err.index_select(0, pair_chosen)
+    theta_l_err = theta_err.index_select(0, pair_rejected)
+    ref_w_err = ref_err.index_select(0, pair_chosen)
+    ref_l_err = ref_err.index_select(0, pair_rejected)
+
+    w_diff = theta_w_err - ref_w_err
+    l_diff = theta_l_err - ref_l_err
+    w_l_diff = w_diff - l_diff
+    inside_term = -0.5 * beta * w_l_diff
+    dpo_loss = -torch.nn.functional.logsigmoid(inside_term).mean()
+
+    with torch.no_grad():
+        implicit_reward_chosen = -0.5 * beta * (theta_w_err - ref_w_err)
+        implicit_reward_rejected = -0.5 * beta * (theta_l_err - ref_l_err)
+        implicit_accuracy = (implicit_reward_chosen > implicit_reward_rejected).float().mean()
+
+    dpo_metrics = {
+        "actor/dpo_loss": dpo_loss.detach().item(),
+        "actor/dpo_implicit_accuracy": implicit_accuracy.detach().item(),
+        "actor/mean_implicit_reward_chosen": implicit_reward_chosen.mean().detach().item(),
+        "actor/mean_implicit_reward_rejected": implicit_reward_rejected.mean().detach().item(),
+        "actor/mean_fm_mse_theta": theta_err.mean().detach().item(),
+        "actor/mean_fm_mse_ref": ref_err.mean().detach().item(),
+    }
+    return dpo_loss, dpo_metrics
+
+
 @register_diffusion_loss("dpo")
 def compute_diffusion_loss_dpo(
     old_log_prob: torch.Tensor,
@@ -343,60 +420,40 @@ def compute_diffusion_loss_dpo(
     advantages: torch.Tensor,
     config: Optional[DictConfig | DiffusionActorConfig] = None,
 ) -> tuple[torch.Tensor, dict[str, Any]]:
-    """Compute the DPO loss for diffusion models.
+    """Fallback DPO surrogate when pairwise FM tensors are unavailable per step.
 
-    The DPO loss is based on the paper "Your Diffusion Model is Secretly a
-    Contrastive Reward Model" (https://arxiv.org/abs/2309.17411).
+    This path expects ``advantages`` to hold *(only on participating rows)* the quantity::
 
-    For diffusion DPO, the loss is:
-        L = -log σ(-β/2 * ((θ_w_err - ref_w_err) - (θ_l_err - ref_l_err)))
-    where err = MSE(noise_pred, noise - x_0) averaged over spatial dims.
+        ``(θ_err_w - ref_err_w) - (θ_err_l - ref_err_l)``
 
-    However, in the verl-omni implementation, we use a simplified version
-    that works with pre-computed advantages.
+    so that::
 
-    Args:
-        old_log_prob (torch.Tensor):
-            Not used in DPO (kept for API compatibility), shape (batch_size,).
-        log_prob (torch.Tensor):
-            Not used in DPO (kept for API compatibility), shape (batch_size,).
-        advantages (torch.Tensor):
-            Advantage estimates for each sample, shape (batch_size,).
-            For DPO, this should be the implicit reward difference.
-        config (verl_omni.workers.config.DiffusionActorConfig):
-            Config for the actor. May contain DPO-specific parameters.
+        ``L = mean( -log σ( -β/2 * advantages ) )``.
 
-    Returns:
-        tuple[torch.Tensor, dict[str, Any]]:
-            The DPO loss and metrics dictionary.
+    Rows with negligible magnitude are masked out so unrelated batch elements do not dilute gradients.
     """
     assert config is not None
 
-    # For DPO, the advantages tensor should contain the implicit reward
-    # differences: (reward_chosen - reward_rejected) for each pair
-    # The loss is then: -log sigmoid(β * advantages)
-
     beta = getattr(config.diffusion_loss, "dpo_beta", 100.0)
+    eps = 1e-8
+    vals = advantages
+    mask = vals.detach().abs() > eps
+    if mask.any():
+        inside_term = -0.5 * beta * vals[mask]
+        dpo_loss = -torch.nn.functional.logsigmoid(inside_term).mean()
+    else:
+        dpo_loss = torch.zeros((), dtype=advantages.dtype, device=advantages.device)
 
-    # The advantages should already be computed as:
-    # advantages = implicit_reward_chosen - implicit_reward_rejected
-    # where implicit_reward = -0.5 * β * (policy_err - ref_err)
-
-    # DPO loss: L = -log σ(β * advantages)
-    dpo_loss = -torch.nn.functional.logsigmoid(beta * advantages).mean()
-
-    # Compute metrics
     with torch.no_grad():
-        implicit_rewards = advantages
-        mean_reward = implicit_rewards.mean()
-        std_reward = implicit_rewards.std()
-        # Accuracy: fraction where implicit_reward > 0 (chosen > rejected)
-        accuracy = (implicit_rewards > 0).float().mean()
+        vd = vals.detach()
+        mean_gap = vd.mean() if vd.numel() > 0 else vd.sum()
+        std_gap = vd.std(unbiased=False) if vd.numel() > 1 else vd.new_zeros(())
+        accuracy = (vd[mask].float() > 0).float().mean() if mask.any() else vd.new_zeros((), dtype=torch.float32)
 
     dpo_metrics = {
         "actor/dpo_loss": dpo_loss.detach().item(),
-        "actor/mean_implicit_reward": mean_reward.detach().item(),
-        "actor/std_implicit_reward": std_reward.detach().item(),
+        "actor/mean_mse_gap": mean_gap.detach().item(),
+        "actor/std_mse_gap": std_gap.detach().item(),
         "actor/dpo_accuracy": accuracy.detach().item(),
     }
 
