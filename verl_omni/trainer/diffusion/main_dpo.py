@@ -25,7 +25,7 @@ from verl.trainer.constants_ppo import get_ppo_ray_runtime_env
 from verl.trainer.ppo.utils import need_reference_policy
 from verl.utils.device import auto_set_device
 
-from verl_omni.trainer.diffusion.ray_dpo_trainer import RayDPOTrainer
+from verl_omni.trainer.diffusion.ray_diffusion_trainer import RayDPOTrainer
 
 
 @hydra.main(config_path="../config", config_name="dpo_trainer", version_base=None)
