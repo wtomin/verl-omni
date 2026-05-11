@@ -11,7 +11,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from . import diffusion_algos
 from .diffusion_algos import *  # noqa: F401,F403
 from .ray_dpo_trainer import RayDPOTrainer
 
-__all__ = list(diffusion_algos.__all__) + ["RayDPOTrainer"]
+# Re-export submodule for `from verl_omni.trainer.diffusion import diffusion_algos`.
+# `diffusion_algos` does not define its own `__all__`; keep this list small and stable.
+__all__ = ["RayDPOTrainer", "diffusion_algos"]
