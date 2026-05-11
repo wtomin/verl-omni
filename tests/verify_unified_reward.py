@@ -60,7 +60,8 @@ def main() -> None:
     parser.add_argument(
         "--model-name",
         default="CodeGoat24/UnifiedReward-2.0-qwen3vl-8b",
-        help="OpenAI model name served by vLLM.",
+        help="OpenAI model name served by vLLM. Should be the same as SERVING_MODEL_NAME in "
+        "``vllm serve --served-model-name SERVING_MODEL_NAME``.",
     )
     args = parser.parse_args()
 
