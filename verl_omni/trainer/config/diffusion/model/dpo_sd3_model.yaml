@@ -20,6 +20,9 @@ tokenizer_path: null
 # whether to use shared memory for model loading
 use_shm: False
 
+# whether to trust remote code.
+trust_remote_code: False
+
 # LoRA configuration
 lora:
 
@@ -46,12 +49,6 @@ pipeline:
   guidance_scale: 1.0
 
   true_cfg_scale: 1.0
-
-# Use remove padding (for diffusion models, usually false)
-use_remove_padding: false
-
-# VAE scale factor for SD3
-vae_scale_factor: 8
 
 # Trust remote code (may be needed for some models)
 trust_remote_code: false
