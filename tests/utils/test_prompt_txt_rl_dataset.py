@@ -32,11 +32,11 @@ def build_prompt_txt_row():
 
 def test_make_example_user_only(build_prompt_txt_row):
     row = build_prompt_txt_row("a red circle", 7, {})
-    assert row["data_source"] == "jpeg_compressibility"
+    assert row["data_source"] == "pick_score"
     assert row["prompt"] == [{"role": "user", "content": "a red circle"}]
     assert row["negative_prompt"] == [{"role": "user", "content": " "}]
     assert row["reward_model"] == {"style": "rule", "ground_truth": ""}
-    assert row["extra_info"] == {"index": 7}
+    assert row["extra_info"] == {"index": 7, "prompt": "a red circle"}
 
 
 def test_make_example_with_system_prompt(build_prompt_txt_row):
@@ -50,3 +50,4 @@ def test_make_example_with_system_prompt(build_prompt_txt_row):
         {"role": "system", "content": "SYS:"},
         {"role": "user", "content": "NEG"},
     ]
+    assert row["extra_info"]["prompt"] == "hello"

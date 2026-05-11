@@ -19,7 +19,12 @@ from typing import Any, Mapping
 
 
 def build_prompt_txt_row(line: str, index: int, config: Mapping[str, Any]) -> dict[str, Any]:
-    """Turn one stripped prompt line into a row compatible with :class:`RLHFDataset`."""
+    """Turn one stripped prompt line into a row compatible with :class:`RLHFDataset`.
+
+    ``extra_info["prompt"]`` duplicates the line text so image rewards (e.g. PickScore via
+    :func:`~verl_omni.utils.reward_score.pick_score.compute_pickscore_reward`) still receive
+    a non-empty prompt when ``reward_model.ground_truth`` is unset.
+    """
     system = config.get("txt_system_prompt", None)
     neg_user = config.get("txt_negative_user_content", " ")
     user_only_neg = config.get("txt_user_only_negative_content", " ")
@@ -46,5 +51,5 @@ def build_prompt_txt_row(line: str, index: int, config: Mapping[str, Any]) -> di
         "prompt": prompt_messages,
         "negative_prompt": negative_messages,
         "reward_model": {"style": reward_style, "ground_truth": reward_gt},
-        "extra_info": {"index": index},
+        "extra_info": {"index": index, "prompt": line},
     }
