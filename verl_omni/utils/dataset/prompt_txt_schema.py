@@ -39,7 +39,7 @@ def build_prompt_txt_row(line: str, index: int, config: Mapping[str, Any]) -> di
 
     reward_style = config.get("txt_reward_style", "rule")
     reward_gt = config.get("txt_reward_ground_truth", "")
-    data_source = config.get("txt_default_data_source", "jpeg_compressibility")
+    data_source = config.get("txt_default_data_source", "pick_score")
 
     return {
         "data_source": data_source,

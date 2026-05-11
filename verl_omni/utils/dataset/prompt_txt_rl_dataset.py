@@ -39,7 +39,7 @@ class PromptTxtRLDataset(RLHFDataset):
 
     Optional ``config`` keys (all under ``data`` in Hydra):
 
-    - ``txt_default_data_source``: forwarded to ``data_source`` (default ``jpeg_compressibility``).
+    - ``txt_default_data_source``: forwarded to ``data_source`` (default ``pick_score``).
     - ``txt_reward_style`` / ``txt_reward_ground_truth``: ``reward_model`` dict fields.
     - ``txt_system_prompt``: if set, prompts become
       ``[system, user(line)]``; negative prompt reuses the same system message.
