@@ -11,8 +11,11 @@ model_type: "diffusion_model"
 # "StableDiffusion3Pipeline" is registered in pipelines/sd3/diffusers_training_adapter.py
 architecture: "StableDiffusion3Pipeline"
 
-# Local path for downloaded model (optional)
-local_path: null
+# path to the huggingface tokenizer. In case it is not the same as path
+tokenizer_path: null
+
+# whether to use shared memory for model loading
+use_shm: False
 
 # LoRA configuration
 lora:
