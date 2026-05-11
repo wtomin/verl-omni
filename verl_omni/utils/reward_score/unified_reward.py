@@ -25,7 +25,7 @@ from openai.types.chat import ChatCompletion
 from PIL import Image
 from transformers import PreTrainedTokenizer
 
-DEFAULT_UNIFIED_REWARD_MODEL_PATH = "CodeGoat24/UnifiedReward-2.0-qwen3vl-8b"
+DEFAULT_UNIFIED_REWARD_MODEL_PATH = "CodeGoat24/UnifiedReward-2.0-qwen3vl-2b"
 DEFAULT_UNIFIED_REWARD_SAMPLING_PARAMS = {"temperature": 0.0, "top_p": 1.0, "max_tokens": 512}
 UNIFIED_REWARD_SCORE_PATTERN = re.compile(
     r"(Alignment|Coherence|Style)\s+Score\s*(?:\(1-5\))?\s*:\s*"
