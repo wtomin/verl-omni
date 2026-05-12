@@ -1038,7 +1038,7 @@ class BaseRayDiffusionTrainer:
                     # Check if the ESI (Elastic Server Instance)/training plan is close to expiration.
                     esi_close_to_expiration = should_save_ckpt_esi(
                         max_steps_duration=self.max_steps_duration,
-                        redundant_time=self.config.trainer.esi_redundant_time,
+                        redundant_time=self.config.trainer.get("esi_redundant_time", 0),
                     )
                     # Check if the conditions for saving a checkpoint are met.
                     # The conditions include a mandatory condition (1) and
