@@ -56,10 +56,10 @@ python3 -m verl_omni.trainer.diffusion.main_dpo \
     reward.custom_reward_function.path=$reward_function_path \
     reward.custom_reward_function.name=compute_score_unified_reward \
     trainer.logger='["console", "wandb"]' \
-    trainer.project_name=flow_grpo \
-    trainer.experiment_name=sd3_unified_reward \
+    trainer.project_name=dpo \
+    trainer.experiment_name=sd3_dpo_unified_reward \
     trainer.log_val_generations=8 \
-    trainer.val_before_train=False \
+    trainer.val_before_train=True \
     trainer.n_gpus_per_node=$NUM_GPUS_ACTOR_ROLLOUT_REWARD \
     trainer.nnodes=1 \
     trainer.save_freq=30 \
