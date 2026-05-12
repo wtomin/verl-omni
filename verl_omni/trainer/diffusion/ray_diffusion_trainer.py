@@ -857,6 +857,12 @@ class BaseRayDiffusionTrainer:
         old_log_prob = tu.get_tensordict({"old_log_probs": log_probs.float()})
         return DataProto.from_tensordict(old_log_prob)
 
+    def _require_log_probs(self) -> bool:
+        return True
+
+    def _require_reference_log_probs(self) -> bool:
+        return self.use_reference_policy
+
     def _actor_mini_batch_size(self) -> int:
         return self.config.actor_rollout_ref.actor.ppo_mini_batch_size * self._rollout_repeat_times()
 
@@ -1004,17 +1010,18 @@ class BaseRayDiffusionTrainer:
                         # extract reward_tensor and reward_extra_infos_dict for training
                         reward_tensor, reward_extra_infos_dict = extract_reward(batch)
 
-                    bypass_recomputing_logprobs = self.config.algorithm.get("bypass_mode", False)
-                    if bypass_recomputing_logprobs:  # Use `rollout_log_probs`
-                        batch.batch["old_log_probs"] = batch.batch["rollout_log_probs"]
-                    else:  # Recompute old_log_probs
-                        with marked_timer("old_log_prob", timing_raw, color="blue"):
-                            old_log_prob = self._compute_old_log_prob(batch)
-                            batch = batch.union(old_log_prob)
+                    if self._require_log_probs():
+                        bypass_recomputing_logprobs = self.config.algorithm.get("bypass_mode", False)
+                        if bypass_recomputing_logprobs:  # Use `rollout_log_probs`
+                            batch.batch["old_log_probs"] = batch.batch["rollout_log_probs"]
+                        else:  # Recompute old_log_probs
+                            with marked_timer("old_log_prob", timing_raw, color="blue"):
+                                old_log_prob = self._compute_old_log_prob(batch)
+                                batch = batch.union(old_log_prob)
 
-                    assert "old_log_probs" in batch.batch, f'"old_log_prob" not in {batch.batch.keys()=}'
+                        assert "old_log_probs" in batch.batch, f'"old_log_prob" not in {batch.batch.keys()=}'
 
-                    if self.use_reference_policy:
+                    if self._require_reference_log_probs():
                         # compute reference log_prob
                         with marked_timer(str(Role.RefPolicy), timing_raw, color="olive"):
                             ref_log_prob = self._compute_ref_log_prob(batch)
@@ -1137,6 +1144,14 @@ class RayDPOTrainer(BaseRayDiffusionTrainer):
             "global_steps": self.global_steps,
         }
         return gen_batch
+
+    def _require_log_probs(self) -> bool:
+        # Different algorithms might be different
+        # For example, Flow-GRPO requires log probabilities, but DPO does not
+        return False
+
+    def _require_reference_log_probs(self) -> bool:
+        return False
 
     def _actor_mini_batch_size(self) -> int:
         return self.config.actor_rollout_ref.actor.ppo_mini_batch_size
