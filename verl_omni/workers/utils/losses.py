@@ -28,7 +28,7 @@ from verl_omni.workers.config import DiffusionActorConfig
 
 def diffusion_loss(config: DiffusionActorConfig, model_output, data: TensorDict, dp_group=None):
     """Compute loss for diffusion model"""
-    log_prob = model_output["log_probs"]
+    log_prob = model_output.get("log_probs", None)
 
     config.global_batch_info["loss_scale_factor"] = config.loss_scale_factor
 
@@ -67,6 +67,8 @@ def diffusion_loss(config: DiffusionActorConfig, model_output, data: TensorDict,
     else:
         if advantages is None:
             raise KeyError(f'"advantages" is required for diffusion loss mode {loss_mode!r}')
+        if log_prob is None:
+            raise KeyError(f'"log_probs" is required for diffusion loss mode {loss_mode!r} without FM DPO tensors')
         if old_log_prob is None:
             if loss_mode != "dpo":
                 raise KeyError(f'"old_log_probs" is required for diffusion loss mode {loss_mode!r}')
