@@ -449,6 +449,16 @@ class DiffusersFSDPEngine(BaseEngine):
             return value[0]
         return value
 
+    @staticmethod
+    def _normalize_non_tensor_array(value, dtype):
+        if hasattr(value, "tolist") and not isinstance(value, np.ndarray):
+            value = value.tolist()
+        if isinstance(value, np.ndarray):
+            return value.astype(dtype, copy=False).reshape(-1)
+        if isinstance(value, (list, tuple)):
+            return np.asarray(value, dtype=dtype).reshape(-1)
+        return np.asarray([value], dtype=dtype)
+
     def _is_final_image_dpo_batch(self, data: TensorDict) -> bool:
         mode = tu.get_non_tensor_data(data=data, key="diffusion_training_mode", default=None)
         return self._normalize_non_tensor_scalar(mode) == "final_image_dpo"
@@ -460,7 +470,7 @@ class DiffusersFSDPEngine(BaseEngine):
             rewards = rewards.detach()
             if rewards.ndim > 1:
                 rewards = rewards.sum(dim=tuple(range(1, rewards.ndim)))
-            uids = np.asarray(uids, dtype=object).reshape(-1)
+            uids = self._normalize_non_tensor_array(uids, dtype=object)
             uid_to_indices: dict[object, list[int]] = defaultdict(list)
             for idx, uid in enumerate(uids):
                 uid_to_indices[uid].append(idx)
@@ -482,7 +492,10 @@ class DiffusersFSDPEngine(BaseEngine):
         rejected = tu.get_non_tensor_data(
             data=data, key="dpo_pair_rejected_indices", default=np.asarray([], dtype=np.int64)
         )
-        return np.asarray(chosen, dtype=np.int64), np.asarray(rejected, dtype=np.int64)
+        return (
+            self._normalize_non_tensor_array(chosen, dtype=np.int64),
+            self._normalize_non_tensor_array(rejected, dtype=np.int64),
+        )
 
     def _get_final_image_dpo_components(self, dtype: torch.dtype):
         model_cls = DiffusionModelBase.get_class(self.model_config)
