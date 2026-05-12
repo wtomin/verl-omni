@@ -1156,6 +1156,36 @@ class RayDPOTrainer(BaseRayDiffusionTrainer):
     def _actor_mini_batch_size(self) -> int:
         return self.config.actor_rollout_ref.actor.ppo_mini_batch_size
 
+    def _update_actor(self, batch: DataProto) -> DataProto:
+        rollout_config = self.config.actor_rollout_ref.rollout
+        batch.meta_info["multi_turn"] = rollout_config.multi_turn.enable
+
+        batch_td = batch.to_tensordict()
+        ppo_mini_batch_size = self._actor_mini_batch_size()
+        ppo_epochs = self.config.actor_rollout_ref.actor.ppo_epochs
+        seed = self.config.actor_rollout_ref.actor.data_loader_seed
+        shuffle = self.config.actor_rollout_ref.actor.shuffle
+
+        tu.assign_non_tensor(
+            batch_td,
+            diffusion_training_mode="final_image_dpo",
+            dpo_pair_chosen_indices=batch.meta_info.get("dpo_pair_chosen_indices", np.asarray([], dtype=np.int64)),
+            dpo_pair_rejected_indices=batch.meta_info.get("dpo_pair_rejected_indices", np.asarray([], dtype=np.int64)),
+            global_batch_size=ppo_mini_batch_size,
+            mini_batch_size=ppo_mini_batch_size,
+            epochs=ppo_epochs,
+            seed=seed,
+            dataloader_kwargs={"shuffle": shuffle},
+            height=self.config.actor_rollout_ref.model.pipeline.height,
+            width=self.config.actor_rollout_ref.model.pipeline.width,
+            vae_scale_factor=self.config.actor_rollout_ref.model.get("vae_scale_factor", 8),
+        )
+
+        actor_output = self.actor_rollout_wg.update_actor(batch_td)
+        actor_output = tu.get(actor_output, "metrics")
+        actor_output = rename_dict(actor_output, "actor/")
+        return DataProto.from_single_dict(data={}, meta_info={"metrics": actor_output})
+
     def _compute_algorithm_advantage(
         self,
         batch: DataProto,
