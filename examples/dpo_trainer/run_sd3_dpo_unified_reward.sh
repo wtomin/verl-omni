@@ -41,7 +41,7 @@ python3 -m verl_omni.trainer.diffusion.main_dpo \
     actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
     actor_rollout_ref.rollout.name=$ENGINE \
     actor_rollout_ref.rollout.n=$NUM_GPUS_ACTOR_ROLLOUT \
-    +actor_rollout_ref.rollout.k_samples=4 \
+    actor_rollout_ref.rollout.k_samples=4 \
     actor_rollout_ref.rollout.agent.num_workers=$((NUM_GPUS_ACTOR_ROLLOUT_REWARD / ROLLOUT_TP)) \
     actor_rollout_ref.rollout.load_format=safetensors \
     actor_rollout_ref.rollout.layered_summon=True \
