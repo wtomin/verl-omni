@@ -3,9 +3,10 @@ set -x
 
 # Set WORKSPACE to any writable directory; defaults to $HOME.
 WORKSPACE=${WORKSPACE:-$HOME}
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
-pickscore_train_path=${PICKSCORE_TRAIN_PATH:-../../../datasets/pickscore/train.txt}
-pickscore_test_path=${PICKSCORE_TEST_PATH:-../../../datasets/pickscore/test.txt}
+pickscore_train_path=${PICKSCORE_TRAIN_PATH:-$SCRIPT_DIR/../../datasets/pickscore/train.txt}
+pickscore_test_path=${PICKSCORE_TEST_PATH:-$SCRIPT_DIR/../../datasets/pickscore/test.txt}
 
 model_name=stabilityai/stable-diffusion-3.5-medium
 reward_model_name=CodeGoat24/UnifiedReward-2.0-qwen3vl-8b
