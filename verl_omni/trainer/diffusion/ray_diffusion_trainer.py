@@ -1154,7 +1154,7 @@ class RayDPOTrainer(BaseRayDiffusionTrainer):
         return self.use_reference_policy and getattr(self.config.actor_rollout_ref.actor, "use_kl_loss", False)
 
     def _actor_mini_batch_size(self) -> int:
-        return self.config.actor_rollout_ref.actor.ppo_mini_batch_size
+        return self.config.actor_rollout_ref.actor.ppo_mini_batch_size * self._rollout_repeat_times()
 
     def _update_actor(self, batch: DataProto) -> DataProto:
         rollout_config = self.config.actor_rollout_ref.rollout
