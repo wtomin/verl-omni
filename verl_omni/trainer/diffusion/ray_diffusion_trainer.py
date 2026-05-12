@@ -1151,7 +1151,7 @@ class RayDPOTrainer(BaseRayDiffusionTrainer):
         return False
 
     def _require_reference_log_probs(self) -> bool:
-        return False
+        return self.use_reference_policy and getattr(self.config.actor_rollout_ref.actor, "use_kl_loss", False)
 
     def _actor_mini_batch_size(self) -> int:
         return self.config.actor_rollout_ref.actor.ppo_mini_batch_size
