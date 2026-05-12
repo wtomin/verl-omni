@@ -73,6 +73,12 @@ class TestComputeDataMetricsDiffusion:
         metrics = compute_data_metrics_diffusion(batch)
         assert self.BASE_KEYS.issubset(set(metrics.keys()))
 
+    def test_accepts_sample_level_scores(self):
+        batch = _make_batch(include_uid=False)
+        batch.batch["sample_level_scores"] = batch.batch.pop("sample_level_rewards")
+        metrics = compute_data_metrics_diffusion(batch)
+        assert self.BASE_KEYS.issubset(set(metrics.keys()))
+
     def test_no_uid_keys_without_uid(self):
         batch = _make_batch(include_uid=False)
         metrics = compute_data_metrics_diffusion(batch)

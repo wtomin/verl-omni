@@ -22,6 +22,15 @@ import torch
 from verl import DataProto
 
 
+def _get_sequence_reward(batch: DataProto) -> torch.Tensor:
+    if "sample_level_rewards" in batch.batch:
+        rewards = batch.batch["sample_level_rewards"]
+    else:
+        rewards = batch.batch["sample_level_scores"]
+
+    return rewards.mean(dim=1) if rewards.ndim > 1 else rewards
+
+
 def compute_data_metrics_diffusion(batch: DataProto) -> dict[str, Any]:
     """
     Computes various metrics from a diffusion training batch.
@@ -31,7 +40,8 @@ def compute_data_metrics_diffusion(batch: DataProto) -> dict[str, Any]:
 
     Args:
         batch: A DataProto object containing diffusion batch data with
-            sample_level_rewards [B, T], advantages [B, T], returns [B, T].
+            sample_level_rewards [B, T] or sample_level_scores [B, ...],
+            advantages [B, T], returns [B, T].
 
     Returns:
         A dictionary of metrics including:
@@ -42,7 +52,7 @@ def compute_data_metrics_diffusion(batch: DataProto) -> dict[str, Any]:
             - critic/advantages/mean, max, min: Element-wise advantage statistics over B*T
             - critic/returns/mean, max, min: Element-wise return statistics over B*T
     """
-    sequence_reward = batch.batch["sample_level_rewards"].mean(dim=1)  # [B]
+    sequence_reward = _get_sequence_reward(batch)  # [B]
 
     # Flatten [B, T] tensors for aggregate statistics across timesteps
     advantages = batch.batch["advantages"].flatten()  # [B*T]
