@@ -17,6 +17,7 @@ from dataclasses import asdict
 from typing import Any, Optional
 
 import ray
+import torch
 import torchvision.transforms as T
 import vllm_omni.entrypoints.cli.serve
 from verl.utils.config import omega_conf_to_dataclass
@@ -203,9 +204,15 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         negative_prompt_embeds = mm_output.get("negative_prompt_embeds")
         negative_prompt_embeds_mask = mm_output.get("negative_prompt_embeds_mask")
 
+        all_timesteps = all_timesteps[0] if all_timesteps is not None else None
+        if all_timesteps is not None and not isinstance(all_timesteps, torch.Tensor):
+            all_timesteps = getattr(all_timesteps, "_return_value", all_timesteps)
+            if not isinstance(all_timesteps, torch.Tensor):
+                all_timesteps = torch.as_tensor(all_timesteps)
+
         extra_fields = {
             "all_latents": all_latents[0] if all_latents is not None else None,
-            "all_timesteps": all_timesteps[0] if all_timesteps is not None else None,
+            "all_timesteps": all_timesteps,
             "prompt_embeds": prompt_embeds[0] if prompt_embeds is not None else None,
             "prompt_embeds_mask": prompt_embeds_mask[0] if prompt_embeds_mask is not None else None,
             "negative_prompt_embeds": negative_prompt_embeds[0] if negative_prompt_embeds is not None else None,
