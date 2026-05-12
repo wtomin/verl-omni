@@ -17,7 +17,7 @@ import torch
 from tensordict import TensorDict
 from verl.utils import tensordict_utils as tu
 
-from verl_omni.workers.config import DiffusionActorConfig
+from verl_omni.workers.config import DiffusionActorConfig, DiffusionLossConfig
 from verl_omni.workers.utils.losses import diffusion_loss
 
 
@@ -40,8 +40,12 @@ def test_final_image_dpo_loss_does_not_require_log_probs_or_trajectory():
         gradient_accumulation_steps=1,
     )
 
-    config = DiffusionActorConfig(strategy="fsdp", ppo_micro_batch_size_per_gpu=1, rollout_n=1)
-    config.diffusion_loss.loss_mode = "dpo"
+    config = DiffusionActorConfig(
+        strategy="fsdp",
+        ppo_micro_batch_size_per_gpu=1,
+        rollout_n=1,
+        diffusion_loss=DiffusionLossConfig(loss_mode="dpo"),
+    )
 
     loss, metrics = diffusion_loss(config=config, model_output=model_output, data=data)
 
