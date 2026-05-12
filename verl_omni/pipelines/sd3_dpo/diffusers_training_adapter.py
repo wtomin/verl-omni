@@ -24,22 +24,21 @@ from tensordict import TensorDict
 from verl.utils.device import get_device_name
 
 from verl_omni.pipelines.model_base import DiffusionModelBase
-from verl_omni.pipelines.schedulers import FlowMatchSDEDiscreteScheduler
 from verl_omni.workers.config import DiffusionModelConfig
 
 __all__ = ["SD3Adapter"]
 
 
-def _build_sd3_scheduler(model_path: str) -> FlowMatchSDEDiscreteScheduler:
+def _build_sd3_scheduler(model_path: str) -> FlowMatchEulerDiscreteScheduler:
     euler = FlowMatchEulerDiscreteScheduler.from_pretrained(
         pretrained_model_name_or_path=model_path,
         subfolder="scheduler",
     )
-    return FlowMatchSDEDiscreteScheduler.from_config(euler.config)
+    return euler
 
 
 def _configure_sd3_scheduler(
-    scheduler: FlowMatchSDEDiscreteScheduler,
+    scheduler: FlowMatchEulerDiscreteScheduler,
     *,
     num_inference_steps: int,
     device: str,
@@ -69,7 +68,7 @@ class SD3Adapter(DiffusionModelBase):
                 used to determine the model path and timestep settings.
 
         Returns:
-            FlowMatchSDEDiscreteScheduler: Scheduler with timesteps already set
+            FlowMatchEulerDiscreteScheduler: Scheduler with timesteps already set
                 for the current device.
         """
         scheduler = _build_sd3_scheduler(model_config.local_path)
@@ -77,11 +76,11 @@ class SD3Adapter(DiffusionModelBase):
         return scheduler
 
     @classmethod
-    def set_timesteps(cls, scheduler: FlowMatchSDEDiscreteScheduler, model_config: DiffusionModelConfig, device: str):
+    def set_timesteps(cls, scheduler: FlowMatchEulerDiscreteScheduler, model_config: DiffusionModelConfig, device: str):
         """Configure timesteps on the scheduler for SD3.
 
         Args:
-            scheduler (FlowMatchSDEDiscreteScheduler): The scheduler whose timesteps
+            scheduler (FlowMatchEulerDiscreteScheduler): The scheduler whose timesteps
                 will be set.
             model_config (DiffusionModelConfig): Configuration providing
                 number of inference steps.
@@ -157,7 +156,7 @@ class SD3Adapter(DiffusionModelBase):
     def forward_and_sample_previous_step(
         cls,
         module: SD3Transformer2DModel,
-        scheduler: FlowMatchSDEDiscreteScheduler,
+        scheduler: FlowMatchEulerDiscreteScheduler,
         model_config: DiffusionModelConfig,
         model_inputs: dict[str, torch.Tensor],
         negative_model_inputs: Optional[dict[str, torch.Tensor]],
@@ -171,7 +170,7 @@ class SD3Adapter(DiffusionModelBase):
 
         Args:
             module (SD3Transformer2DModel): The SD3 transformer module.
-            scheduler (FlowMatchSDEDiscreteScheduler): Scheduler used to sample
+            scheduler (FlowMatchEulerDiscreteScheduler): Scheduler used to sample
                 the previous step and compute log-probabilities.
             model_config (DiffusionModelConfig): Configuration providing
                 ``guidance_scale``, ``algo.noise_level``, and ``algo.sde_type``.
@@ -198,17 +197,14 @@ class SD3Adapter(DiffusionModelBase):
             neg_noise_pred = module(**negative_model_inputs)[0]
             noise_pred = neg_noise_pred + guidance_scale * (noise_pred - neg_noise_pred)
 
-        algo = model_config.algo
-        noise_level = algo.noise_level if algo is not None else 0.7
-        sde_type = algo.sde_type if algo is not None else "sde"
-
-        _, log_prob, prev_sample_mean, std_dev_t = scheduler.sample_previous_step(
+        prev_sample = scheduler.step(
             sample=latents[:, step].float(),
             model_output=noise_pred.float(),
             timestep=timesteps[:, step],
-            noise_level=noise_level,
             prev_sample=latents[:, step + 1].float(),
-            sde_type=sde_type,
-            return_logprobs=True,
-        )
+        ).prev_sample
+        prev_sample_mean = prev_sample
+        log_prob = None
+        std_dev_t = torch.zeros_like(timesteps[:, step])
+
         return log_prob, prev_sample_mean, std_dev_t, noise_pred
