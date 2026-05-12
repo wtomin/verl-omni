@@ -564,6 +564,13 @@ class DiffusersFSDPEngine(BaseEngine):
             out["noise_pred_theta"] = output[3]
         return out
 
+    @staticmethod
+    def _select_timestep_tensor(tensor: torch.Tensor, step: int) -> torch.Tensor:
+        if tensor.ndim >= 2:
+            step_idx = step if tensor.shape[1] > step else 0
+            return tensor[:, step_idx]
+        return tensor
+
     def forward_step(self, micro_batch: TensorDict, loss_function, forward_only, step):
         model_inputs, negative_model_inputs = self.prepare_model_inputs(micro_batch=micro_batch, step=step)
         raw_output_policy = forward_and_sample_previous_step(
@@ -607,11 +614,15 @@ class DiffusersFSDPEngine(BaseEngine):
             model_output["noise_pred_ref"] = noise_pred_ref
 
         if loss_function is not None:
-            data = tu.get_tensordict(
-                {
-                    "old_log_probs": micro_batch["old_log_probs"][:, step],
-                    "advantages": micro_batch["advantages"][:, step],
-                },
+            loss_inputs = {}
+            if micro_batch.get("old_log_probs", None) is not None:
+                loss_inputs["old_log_probs"] = self._select_timestep_tensor(micro_batch["old_log_probs"], step)
+            if micro_batch.get("advantages", None) is not None:
+                loss_inputs["advantages"] = self._select_timestep_tensor(micro_batch["advantages"], step)
+            data = (
+                tu.get_tensordict(loss_inputs)
+                if loss_inputs
+                else TensorDict({}, batch_size=micro_batch.batch_size, device=micro_batch.device)
             )
             tu.assign_non_tensor(
                 data,
@@ -621,10 +632,10 @@ class DiffusersFSDPEngine(BaseEngine):
             )
 
             if micro_batch.get("ref_log_prob", None) is not None:
-                data["ref_log_prob"] = micro_batch["ref_log_prob"][:, step]
+                data["ref_log_prob"] = self._select_timestep_tensor(micro_batch["ref_log_prob"], step)
 
             if micro_batch.get("ref_prev_sample_mean", None) is not None:
-                data["ref_prev_sample_mean"] = micro_batch["ref_prev_sample_mean"][:, step]
+                data["ref_prev_sample_mean"] = self._select_timestep_tensor(micro_batch["ref_prev_sample_mean"], step)
 
             pair_chosen_step = tu.get_non_tensor_data(data=micro_batch, key="dpo_pair_chosen_indices", default=None)
             for key in ("dpo_pair_chosen_indices", "dpo_pair_rejected_indices"):
