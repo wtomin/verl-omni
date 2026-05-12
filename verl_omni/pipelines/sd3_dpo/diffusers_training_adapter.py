@@ -165,7 +165,7 @@ class SD3Adapter(DiffusionModelBase):
     ):
         """Run the SD3 transformer and sample the previous denoising step.
 
-        Used by RL algorithms (DPO, FlowGRPO) that require log-probabilities for
+        Used by RL algorithms DPO that does not require log-probabilities for
         reversed sampling.
 
         Args:

@@ -37,7 +37,7 @@ python3 -m verl_omni.trainer.diffusion.main_dpo \
     actor_rollout_ref.actor.fsdp_config.param_offload=True \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=True \
     actor_rollout_ref.actor.fsdp_config.model_dtype=bfloat16 \
-    actor_rollout_ref.actor.diffusion_loss.loss_mode=flow_grpo \
+    actor_rollout_ref.actor.diffusion_loss.loss_mode=dpo \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=32 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
     actor_rollout_ref.rollout.name=$ENGINE \
@@ -45,14 +45,9 @@ python3 -m verl_omni.trainer.diffusion.main_dpo \
     actor_rollout_ref.rollout.agent.num_workers=$((NUM_GPUS_ACTOR_ROLLOUT_REWARD / ROLLOUT_TP)) \
     actor_rollout_ref.rollout.load_format=safetensors \
     actor_rollout_ref.rollout.layered_summon=True \
-    actor_rollout_ref.rollout.pipeline.true_cfg_scale=4.0 \
+    actor_rollout_ref.rollout.pipeline.guidance_scale=4.0 \
     actor_rollout_ref.rollout.pipeline.max_sequence_length=256 \
-    actor_rollout_ref.rollout.algo.noise_level=1.2 \
-    actor_rollout_ref.rollout.algo.sde_type="sde" \
-    actor_rollout_ref.rollout.algo.sde_window_size=2 \
-    actor_rollout_ref.rollout.algo.sde_window_range="[0,5]" \
     actor_rollout_ref.rollout.val_kwargs.pipeline.num_inference_steps=50 \
-    actor_rollout_ref.rollout.val_kwargs.algo.noise_level=0.0 \
     reward.num_workers=$((NUM_GPUS_ACTOR_ROLLOUT_REWARD / REWARD_TP)) \
     reward.reward_model.enable=True \
     reward.reward_model.model_path=$reward_model_name \
