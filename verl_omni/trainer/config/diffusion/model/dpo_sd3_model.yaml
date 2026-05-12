@@ -28,7 +28,7 @@ use_shm: False
 trust_remote_code: False
 
 # custom chat template for the model
-custom_chat_template: null
+custom_chat_template: "{% for message in messages %}{{ message['content'] }}{% endfor %}"
 
 # whether to use external libs for the model
 external_lib: null
