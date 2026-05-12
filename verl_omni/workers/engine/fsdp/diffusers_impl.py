@@ -20,9 +20,11 @@ import json
 import logging
 import os
 import warnings
+from collections import defaultdict
 from contextlib import contextmanager, nullcontext
 from typing import Callable, Optional
 
+import numpy as np
 import torch
 import torch.distributed
 from peft import LoraConfig
@@ -59,6 +61,7 @@ from verl.workers.engine.base import BaseEngine, BaseEngineCtx, EngineRegistry
 from verl.workers.engine.fsdp.utils import create_device_mesh, get_sharding_strategy
 from verl.workers.engine.utils import enable_full_determinism, prepare_micro_batches
 
+from verl_omni.pipelines.model_base import DiffusionModelBase
 from verl_omni.pipelines.utils import build_scheduler, forward_and_sample_previous_step, prepare_model_inputs
 from verl_omni.utils.fsdp_utils import collect_lora_params
 from verl_omni.workers.config import DiffusionModelConfig
@@ -112,6 +115,7 @@ class DiffusersFSDPEngine(BaseEngine):
         self._is_offload_param = self.engine_config.param_offload
         self._is_offload_optimizer = self.engine_config.optimizer_offload
         self._is_lora = self.model_config.lora_rank > 0
+        self._final_image_dpo_components = None
 
     @property
     def is_param_offload_enabled(self) -> bool:
@@ -434,9 +438,172 @@ class DiffusersFSDPEngine(BaseEngine):
     def get_context_parallel_group(self):
         raise NotImplementedError
 
+    @staticmethod
+    def _normalize_non_tensor_scalar(value):
+        if isinstance(value, np.ndarray):
+            if value.ndim == 0:
+                return value.item()
+            if value.size == 1:
+                return value.reshape(-1)[0]
+        if isinstance(value, (list, tuple)) and len(value) == 1:
+            return value[0]
+        return value
+
+    def _is_final_image_dpo_batch(self, data: TensorDict) -> bool:
+        mode = tu.get_non_tensor_data(data=data, key="diffusion_training_mode", default=None)
+        return self._normalize_non_tensor_scalar(mode) == "final_image_dpo"
+
+    def _get_local_dpo_pair_indices(self, data: TensorDict) -> tuple[np.ndarray, np.ndarray]:
+        rewards = data.get("sample_level_scores", None)
+        uids = tu.get_non_tensor_data(data=data, key="uid", default=None)
+        if isinstance(rewards, torch.Tensor) and uids is not None:
+            rewards = rewards.detach()
+            if rewards.ndim > 1:
+                rewards = rewards.sum(dim=tuple(range(1, rewards.ndim)))
+            uids = np.asarray(uids, dtype=object).reshape(-1)
+            uid_to_indices: dict[object, list[int]] = defaultdict(list)
+            for idx, uid in enumerate(uids):
+                uid_to_indices[uid].append(idx)
+
+            chosen: list[int] = []
+            rejected: list[int] = []
+            for indices in uid_to_indices.values():
+                if len(indices) < 2:
+                    continue
+                local_rewards = rewards[indices]
+                order = torch.argsort(local_rewards, descending=True)
+                chosen.append(int(indices[int(order[0].item())]))
+                rejected.append(int(indices[int(order[-1].item())]))
+            return np.asarray(chosen, dtype=np.int64), np.asarray(rejected, dtype=np.int64)
+
+        chosen = tu.get_non_tensor_data(
+            data=data, key="dpo_pair_chosen_indices", default=np.asarray([], dtype=np.int64)
+        )
+        rejected = tu.get_non_tensor_data(
+            data=data, key="dpo_pair_rejected_indices", default=np.asarray([], dtype=np.int64)
+        )
+        return np.asarray(chosen, dtype=np.int64), np.asarray(rejected, dtype=np.int64)
+
+    def _get_final_image_dpo_components(self, dtype: torch.dtype):
+        model_cls = DiffusionModelBase.get_class(self.model_config)
+        build_components = getattr(model_cls, "build_final_image_dpo_components", None)
+        if build_components is None:
+            raise NotImplementedError(f"{model_cls.__name__} does not implement final-image DPO preprocessing helpers.")
+        if self._final_image_dpo_components is None:
+            self._final_image_dpo_components = build_components(
+                self.model_config,
+                device=get_device_id(),
+                dtype=dtype,
+            )
+        return self._final_image_dpo_components
+
+    def forward_final_image_dpo_step(self, micro_batch: TensorDict):
+        model_cls = DiffusionModelBase.get_class(self.model_config)
+        prepare_inputs = getattr(model_cls, "prepare_final_image_dpo_inputs", None)
+        forward_step = getattr(model_cls, "forward_final_image_dpo_step", None)
+        if prepare_inputs is None or forward_step is None:
+            raise NotImplementedError(f"{model_cls.__name__} does not support final-image DPO training.")
+
+        param = next(self.module.parameters())
+        dtype = param.dtype if param.is_floating_point() else torch.bfloat16
+        components = self._get_final_image_dpo_components(dtype)
+        model_inputs, negative_model_inputs, loss_data = prepare_inputs(
+            module=self.module,
+            scheduler=self.scheduler,
+            model_config=self.model_config,
+            components=components,
+            micro_batch=micro_batch,
+            device=get_device_id(),
+            dtype=dtype,
+        )
+
+        noise_pred_theta = forward_step(
+            module=self.module,
+            model_config=self.model_config,
+            model_inputs=model_inputs,
+            negative_model_inputs=negative_model_inputs,
+        )
+
+        ref_noise_pred = micro_batch.get("ref_noise_pred", None)
+        if ref_noise_pred is None:
+            if self._is_lora and getattr(self.module, "disable_adapters", None) is not None:
+                with torch.no_grad(), self.disable_adapter():
+                    ref_noise_pred = forward_step(
+                        module=self.module,
+                        model_config=self.model_config,
+                        model_inputs=model_inputs,
+                        negative_model_inputs=negative_model_inputs,
+                    )
+            else:
+                ref_noise_pred = noise_pred_theta.detach()
+
+        model_output = {
+            "noise_pred_theta": noise_pred_theta,
+            "noise_pred_ref": ref_noise_pred,
+        }
+        return model_output, loss_data
+
+    def forward_backward_final_image_dpo_batch(
+        self, data: TensorDict, loss_function: Callable, forward_only: bool = False
+    ) -> dict:
+        tu.assign_non_tensor(data, use_dynamic_bsz=False)
+        micro_batches, _ = prepare_micro_batches(
+            data=data, dp_group=self.get_data_parallel_group(), same_micro_num_in_dp=True
+        )
+        gradient_accumulation_steps = len(micro_batches)
+
+        losses = []
+        aggregated_metrics = {}
+        ctx = torch.no_grad() if forward_only else nullcontext()
+        with ctx:
+            for micro_batch in micro_batches:
+                micro_batch = micro_batch.to(get_device_id())
+                pair_chosen, pair_rejected = self._get_local_dpo_pair_indices(micro_batch)
+                tu.assign_non_tensor(
+                    micro_batch,
+                    gradient_accumulation_steps=gradient_accumulation_steps,
+                    dpo_pair_chosen_indices=pair_chosen,
+                    dpo_pair_rejected_indices=pair_rejected,
+                )
+
+                model_output, loss_data = self.forward_final_image_dpo_step(micro_batch)
+                for key in ("dpo_pair_chosen_indices", "dpo_pair_rejected_indices", "gradient_accumulation_steps"):
+                    val = tu.get_non_tensor_data(data=micro_batch, key=key, default=None)
+                    if val is not None:
+                        tu.assign_non_tensor(loss_data, **{key: val})
+
+                if loss_function is None:
+                    assert forward_only, "forward_only must be True when loss_function is None"
+                    loss = torch.tensor(1.0, device=get_device_id())
+                    metrics = {}
+                else:
+                    loss, metrics = loss_function(
+                        model_output=model_output,
+                        data=loss_data,
+                        dp_group=self.get_data_parallel_group(),
+                    )
+
+                if not forward_only:
+                    loss.backward()
+                losses.append(loss.detach().item())
+                append_to_dict(aggregated_metrics, metrics)
+
+        return {
+            "model_output": {},
+            "loss": losses,
+            "metrics": aggregated_metrics,
+        }
+
     def forward_backward_batch(
         self, data: TensorDict, loss_function: Callable, forward_only: bool = False
     ) -> list[TensorDict]:
+        if self._is_final_image_dpo_batch(data):
+            return self.forward_backward_final_image_dpo_batch(
+                data=data,
+                loss_function=loss_function,
+                forward_only=forward_only,
+            )
+
         num_timesteps = data["all_timesteps"].shape[1]
         tu.assign_non_tensor(data, use_dynamic_bsz=False)
 
