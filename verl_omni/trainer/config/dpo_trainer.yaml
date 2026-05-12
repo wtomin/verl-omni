@@ -92,7 +92,7 @@ algorithm:
   global_std: false
 
   # Whether to bypass old log-prob recomputation
-  bypass_mode: false
+  bypass_mode: true
 
 # config for the trainer
 trainer:
