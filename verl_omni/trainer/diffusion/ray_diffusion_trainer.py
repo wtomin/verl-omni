@@ -54,6 +54,7 @@ from verl_omni.trainer.config import DiffusionAlgoConfig
 from verl_omni.trainer.diffusion.diffusion_algos import DiffusionAdvantageEstimator, get_diffusion_adv_estimator_fn
 from verl_omni.trainer.diffusion.diffusion_metric_utils import (
     compute_data_metrics_diffusion,
+    compute_reward_metrics_diffusion,
     compute_throughput_metrics_diffusion,
     compute_timing_metrics_diffusion,
 )
@@ -145,8 +146,6 @@ def compute_dpo_pair_advantage(
     for i, uid in enumerate(uids):
         uid_to_indices[uid].append(i)
 
-    advantages = torch.zeros_like(rewards)
-    returns = torch.zeros_like(rewards)
     pair_chosen: list[int] = []
     pair_rejected: list[int] = []
 
@@ -164,15 +163,6 @@ def compute_dpo_pair_advantage(
     data.meta_info["dpo_pair_chosen_indices"] = np.asarray(pair_chosen, dtype=np.int64)
     data.meta_info["dpo_pair_rejected_indices"] = np.asarray(pair_rejected, dtype=np.int64)
 
-    adv_cols = advantages.unsqueeze(-1)
-    ret_cols = returns.unsqueeze(-1)
-    if "old_log_probs" in data.batch.keys():
-        num_timesteps = data.batch["old_log_probs"].shape[1]
-        adv_cols = adv_cols.expand(-1, num_timesteps)
-        ret_cols = ret_cols.expand(-1, num_timesteps)
-
-    data.batch["advantages"] = adv_cols
-    data.batch["returns"] = ret_cols
     return data
 
 
@@ -952,6 +942,12 @@ class BaseRayDiffusionTrainer:
             # The dataset may be changed after each training batch.
             self.train_dataset.on_batch_end(batch=batch)
 
+    def _compute_training_data_metrics(self, batch: DataProto) -> dict[str, Any]:
+        return compute_data_metrics_diffusion(batch=batch)
+
+    def _num_training_images(self, batch: DataProto) -> int:
+        return batch.batch["advantages"].shape[0]
+
     def fit(self):
         """
         The training loop of a diffusion policy optimization algorithm.
@@ -1113,9 +1109,9 @@ class BaseRayDiffusionTrainer:
                     }
                 )
                 # collect metrics
-                metrics.update(compute_data_metrics_diffusion(batch=batch))
+                metrics.update(self._compute_training_data_metrics(batch=batch))
                 n_gpus = self.resource_pool_manager.get_n_gpus()
-                num_images = batch.batch["advantages"].shape[0]
+                num_images = self._num_training_images(batch=batch)
                 metrics.update(compute_timing_metrics_diffusion(timing_raw=timing_raw, num_images=num_images))
                 metrics.update(compute_throughput_metrics_diffusion(batch=batch, timing_raw=timing_raw, n_gpus=n_gpus))
                 self._update_post_training_metrics(batch, metrics)
@@ -1230,3 +1226,9 @@ class RayDPOTrainer(BaseRayDiffusionTrainer):
 
     def _on_train_batch_end(self, batch: DataProto) -> None:
         return None
+
+    def _compute_training_data_metrics(self, batch: DataProto) -> dict[str, Any]:
+        return compute_reward_metrics_diffusion(batch=batch)
+
+    def _num_training_images(self, batch: DataProto) -> int:
+        return batch.batch["sample_level_scores"].shape[0]

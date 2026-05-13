@@ -31,6 +31,30 @@ def _get_sequence_reward(batch: DataProto) -> torch.Tensor:
     return rewards.mean(dim=1) if rewards.ndim > 1 else rewards
 
 
+def compute_reward_metrics_diffusion(batch: DataProto) -> dict[str, Any]:
+    """Compute reward-only metrics for algorithms that do not materialize advantages/returns."""
+    sequence_reward = _get_sequence_reward(batch)  # [B]
+
+    metrics = {
+        "critic/rewards/mean": torch.mean(sequence_reward).detach().item(),
+        "critic/rewards/max": torch.max(sequence_reward).detach().item(),
+        "critic/rewards/min": torch.min(sequence_reward).detach().item(),
+    }
+
+    if "uid" in batch.non_tensor_batch:
+        rewards_np = sequence_reward.cpu().float().numpy()
+        uid_array = np.array(batch.non_tensor_batch["uid"])
+        unique_uids = np.unique(uid_array)
+
+        per_prompt_stds = np.array([np.std(rewards_np[uid_array == uid]) for uid in unique_uids])
+
+        metrics["critic/rewards/zero_std_ratio"] = float(np.mean(per_prompt_stds == 0))
+        metrics["critic/rewards/std_mean"] = float(np.mean(per_prompt_stds))
+        metrics["critic/rewards/group_size"] = float(len(rewards_np) / len(unique_uids))
+
+    return metrics
+
+
 def compute_data_metrics_diffusion(batch: DataProto) -> dict[str, Any]:
     """
     Computes various metrics from a diffusion training batch.
@@ -52,41 +76,24 @@ def compute_data_metrics_diffusion(batch: DataProto) -> dict[str, Any]:
             - critic/advantages/mean, max, min: Element-wise advantage statistics over B*T
             - critic/returns/mean, max, min: Element-wise return statistics over B*T
     """
-    sequence_reward = _get_sequence_reward(batch)  # [B]
+    metrics = compute_reward_metrics_diffusion(batch)
 
     # Flatten [B, T] tensors for aggregate statistics across timesteps
     advantages = batch.batch["advantages"].flatten()  # [B*T]
     returns = batch.batch["returns"].flatten()  # [B*T]
 
-    reward_mean = torch.mean(sequence_reward).detach().item()
-    reward_max = torch.max(sequence_reward).detach().item()
-    reward_min = torch.min(sequence_reward).detach().item()
-
-    metrics = {
-        # reward
-        "critic/rewards/mean": reward_mean,
-        "critic/rewards/max": reward_max,
-        "critic/rewards/min": reward_min,
-        # adv
-        "critic/advantages/mean": torch.mean(advantages).detach().item(),
-        "critic/advantages/max": torch.max(advantages).detach().item(),
-        "critic/advantages/min": torch.min(advantages).detach().item(),
-        # returns
-        "critic/returns/mean": torch.mean(returns).detach().item(),
-        "critic/returns/max": torch.max(returns).detach().item(),
-        "critic/returns/min": torch.min(returns).detach().item(),
-    }
-
-    if "uid" in batch.non_tensor_batch:
-        rewards_np = sequence_reward.cpu().float().numpy()
-        uid_array = np.array(batch.non_tensor_batch["uid"])
-        unique_uids = np.unique(uid_array)
-
-        per_prompt_stds = np.array([np.std(rewards_np[uid_array == uid]) for uid in unique_uids])
-
-        metrics["critic/rewards/zero_std_ratio"] = float(np.mean(per_prompt_stds == 0))
-        metrics["critic/rewards/std_mean"] = float(np.mean(per_prompt_stds))
-        metrics["critic/rewards/group_size"] = float(len(rewards_np) / len(unique_uids))
+    metrics.update(
+        {
+            # adv
+            "critic/advantages/mean": torch.mean(advantages).detach().item(),
+            "critic/advantages/max": torch.max(advantages).detach().item(),
+            "critic/advantages/min": torch.min(advantages).detach().item(),
+            # returns
+            "critic/returns/mean": torch.mean(returns).detach().item(),
+            "critic/returns/max": torch.max(returns).detach().item(),
+            "critic/returns/min": torch.min(returns).detach().item(),
+        }
+    )
 
     return metrics
 
@@ -137,7 +144,10 @@ def compute_throughput_metrics_diffusion(batch: DataProto, timing_raw: dict[str,
             - perf/time_per_step: Time taken for the step in seconds
             - perf/throughput: Images generated per second per GPU
     """
-    batch_size = batch.batch["advantages"].shape[0]
+    if "advantages" in batch.batch:
+        batch_size = batch.batch["advantages"].shape[0]
+    else:
+        batch_size = batch.batch["sample_level_scores"].shape[0]
     time = timing_raw["step"]
     return {
         "perf/total_num_images": batch_size,
