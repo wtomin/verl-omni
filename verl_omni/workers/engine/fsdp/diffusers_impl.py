@@ -614,10 +614,16 @@ class DiffusersFSDPEngine(BaseEngine):
                     gradient_accumulation_steps=gradient_accumulation_steps,
                     dpo_pair_chosen_indices=pair_chosen,
                     dpo_pair_rejected_indices=pair_rejected,
+                    sp_size=self.ulysses_sequence_parallel_size,
                 )
 
                 model_output, loss_data = self.forward_final_image_dpo_step(micro_batch)
-                for key in ("dpo_pair_chosen_indices", "dpo_pair_rejected_indices", "gradient_accumulation_steps"):
+                for key in (
+                    "dpo_pair_chosen_indices",
+                    "dpo_pair_rejected_indices",
+                    "gradient_accumulation_steps",
+                    "sp_size",
+                ):
                     val = tu.get_non_tensor_data(data=micro_batch, key=key, default=None)
                     if val is not None:
                         tu.assign_non_tensor(loss_data, **{key: val})
