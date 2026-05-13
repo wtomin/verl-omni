@@ -52,7 +52,12 @@ def diffusion_loss(config: DiffusionActorConfig, model_output, data: TensorDict,
         and len(pc_raw) > 0
     )
 
-    if fm_ready:
+    if loss_mode == "dpo":
+        if not fm_ready:
+            raise KeyError(
+                '"noise_pred_theta", "noise_pred_ref", "fm_velocity_target", and non-empty '
+                '"dpo_pair_chosen_indices"/"dpo_pair_rejected_indices" are required for DPO diffusion loss'
+            )
         device = model_output["noise_pred_theta"].device
         pc = torch.as_tensor(pc_raw, device=device, dtype=torch.long)
         pr = torch.as_tensor(pr_raw, device=device, dtype=torch.long)
@@ -68,11 +73,9 @@ def diffusion_loss(config: DiffusionActorConfig, model_output, data: TensorDict,
         if advantages is None:
             raise KeyError(f'"advantages" is required for diffusion loss mode {loss_mode!r}')
         if log_prob is None:
-            raise KeyError(f'"log_probs" is required for diffusion loss mode {loss_mode!r} without FM DPO tensors')
+            raise KeyError(f'"log_probs" is required for diffusion loss mode {loss_mode!r}')
         if old_log_prob is None:
-            if loss_mode != "dpo":
-                raise KeyError(f'"old_log_probs" is required for diffusion loss mode {loss_mode!r}')
-            old_log_prob = torch.zeros_like(log_prob)
+            raise KeyError(f'"old_log_probs" is required for diffusion loss mode {loss_mode!r}')
         policy_loss_fn = get_diffusion_loss_fn(loss_mode)
         pg_loss, pg_metrics = policy_loss_fn(
             old_log_prob=old_log_prob,

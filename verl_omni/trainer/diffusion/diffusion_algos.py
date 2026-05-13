@@ -381,7 +381,7 @@ def compute_diffusion_dpo_fm_loss(
         Scalar loss tensor and a metrics dictionary.
     """
     if pair_chosen.numel() == 0:
-        return policy_noise_pred.sum() * 0.0, {"actor/dpo_loss": 0.0, "actor/dpo_accuracy": 0.0}
+        raise ValueError("FM-DPO requires at least one chosen/rejected preference pair")
 
     theta_err = _spatial_mse_per_sample(policy_noise_pred, fm_velocity_target)
     ref_err = _spatial_mse_per_sample(ref_noise_pred.detach(), fm_velocity_target)
@@ -410,51 +410,4 @@ def compute_diffusion_dpo_fm_loss(
         "actor/mean_fm_mse_theta": theta_err.mean().detach().item(),
         "actor/mean_fm_mse_ref": ref_err.mean().detach().item(),
     }
-    return dpo_loss, dpo_metrics
-
-
-@register_diffusion_loss("dpo")
-def compute_diffusion_loss_dpo(
-    old_log_prob: torch.Tensor,
-    log_prob: torch.Tensor,
-    advantages: torch.Tensor,
-    config: Optional[DictConfig | DiffusionActorConfig] = None,
-) -> tuple[torch.Tensor, dict[str, Any]]:
-    """Fallback DPO surrogate when pairwise FM tensors are unavailable per step.
-
-    This path expects ``advantages`` to hold *(only on participating rows)* the quantity::
-
-        ``(θ_err_w - ref_err_w) - (θ_err_l - ref_err_l)``
-
-    so that::
-
-        ``L = mean( -log σ( -β/2 * advantages ) )``.
-
-    Rows with negligible magnitude are masked out so unrelated batch elements do not dilute gradients.
-    """
-    assert config is not None
-
-    beta = getattr(config.diffusion_loss, "dpo_beta", 100.0)
-    eps = 1e-8
-    vals = advantages
-    mask = vals.detach().abs() > eps
-    if mask.any():
-        inside_term = -0.5 * beta * vals[mask]
-        dpo_loss = -torch.nn.functional.logsigmoid(inside_term).mean()
-    else:
-        dpo_loss = torch.zeros((), dtype=advantages.dtype, device=advantages.device)
-
-    with torch.no_grad():
-        vd = vals.detach()
-        mean_gap = vd.mean() if vd.numel() > 0 else vd.sum()
-        std_gap = vd.std(unbiased=False) if vd.numel() > 1 else vd.new_zeros(())
-        accuracy = (vd[mask].float() > 0).float().mean() if mask.any() else vd.new_zeros((), dtype=torch.float32)
-
-    dpo_metrics = {
-        "actor/dpo_loss": dpo_loss.detach().item(),
-        "actor/mean_mse_gap": mean_gap.detach().item(),
-        "actor/std_mse_gap": std_gap.detach().item(),
-        "actor/dpo_accuracy": accuracy.detach().item(),
-    }
-
     return dpo_loss, dpo_metrics
