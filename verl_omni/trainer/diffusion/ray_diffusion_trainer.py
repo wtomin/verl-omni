@@ -62,6 +62,28 @@ from verl_omni.workers.utils.padding import embeds_padding_2_no_padding
 logger = __import__("logging").getLogger(__file__)
 
 
+def _is_numeric_metric_value(value: Any) -> bool:
+    return isinstance(value, (int, float, np.number)) and not isinstance(value, bool)
+
+
+def _numeric_validation_reward_infos(reward_extra_infos_dict: dict[str, list]) -> dict[str, list]:
+    """Keep only numeric reward extras for verl's validation metric reducer."""
+    numeric_infos = {}
+    for key, values in reward_extra_infos_dict.items():
+        if not values:
+            continue
+        if all(_is_numeric_metric_value(value) for value in values):
+            numeric_infos[key] = [float(value) for value in values]
+            continue
+        if all(isinstance(value, dict) for value in values):
+            subkeys = sorted({subkey for value in values for subkey in value})
+            for subkey in subkeys:
+                subvalues = [value.get(subkey) for value in values]
+                if all(_is_numeric_metric_value(value) for value in subvalues):
+                    numeric_infos[f"{key}/{subkey}"] = [float(value) for value in subvalues]
+    return numeric_infos
+
+
 def compute_advantage(
     data: DataProto,
     adv_estimator: str,
@@ -563,7 +585,8 @@ class BaseRayDiffusionTrainer:
         return self._val_metrics_update(data_sources, sample_uids, reward_extra_infos_dict, sample_turns)
 
     def _val_metrics_update(self, data_sources, sample_uids, reward_extra_infos_dict, sample_turns):
-        data_src2var2metric2val = process_validation_metrics(data_sources, sample_uids, reward_extra_infos_dict)
+        metric_reward_infos = _numeric_validation_reward_infos(reward_extra_infos_dict)
+        data_src2var2metric2val = process_validation_metrics(data_sources, sample_uids, metric_reward_infos)
         metric_dict = {}
         for data_source, var2metric2val in data_src2var2metric2val.items():
             core_var = "acc" if "acc" in var2metric2val else "reward"
