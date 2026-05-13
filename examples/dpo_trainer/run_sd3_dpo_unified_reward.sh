@@ -27,9 +27,9 @@ python3 -m verl_omni.trainer.diffusion.main_dpo \
     data.train_batch_size=4 \
     data.max_prompt_length=256 \
     actor_rollout_ref.model.path=$model_name \
-    actor_rollout_ref.rollout.pipeline.height=256 \
-    actor_rollout_ref.rollout.pipeline.width=256 \
-    actor_rollout_ref.rollout.pipeline.num_inference_steps=25 \
+    actor_rollout_ref.rollout.pipeline.height=512 \
+    actor_rollout_ref.rollout.pipeline.width=512 \
+    actor_rollout_ref.rollout.pipeline.num_inference_steps=50 \
     actor_rollout_ref.model.lora_rank=64 \
     actor_rollout_ref.model.lora_alpha=128 \
     actor_rollout_ref.model.target_modules="['to_q','to_k','to_v','to_out.0','add_q_proj','add_k_proj','add_v_proj','to_add_out','img_mlp.net.0.proj','img_mlp.net.2','txt_mlp.net.0.proj','txt_mlp.net.2']" \
@@ -37,8 +37,8 @@ python3 -m verl_omni.trainer.diffusion.main_dpo \
     actor_rollout_ref.actor.optim.weight_decay=0.0001 \
     actor_rollout_ref.actor.ppo_mini_batch_size=4 \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=4 \
-    actor_rollout_ref.actor.fsdp_config.param_offload=True \
-    actor_rollout_ref.actor.fsdp_config.optimizer_offload=True \
+    actor_rollout_ref.actor.fsdp_config.param_offload=False \
+    actor_rollout_ref.actor.fsdp_config.optimizer_offload=False \
     actor_rollout_ref.actor.fsdp_config.model_dtype=bfloat16 \
     actor_rollout_ref.actor.diffusion_loss.loss_mode=dpo \
     actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
