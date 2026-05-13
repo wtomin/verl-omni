@@ -20,6 +20,7 @@ from verl.experimental.agent_loop.agent_loop import AgentLoopBase, register
 from verl.utils.profiler import simple_timer
 
 from verl_omni.agent_loop.diffusion_agent_loop import DiffusionAgentLoopOutput
+from verl_omni.agent_loop.prompt_utils import stringify_prompt_messages
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -43,6 +44,10 @@ class DiffusionSingleTurnAgentLoop(AgentLoopBase):
         """
         raw_prompt = kwargs["raw_prompt"]
         raw_negative_prompt = kwargs.get("raw_negative_prompt")
+        prompt_text = stringify_prompt_messages(raw_prompt)
+        negative_prompt_text = (
+            stringify_prompt_messages(raw_negative_prompt) if raw_negative_prompt is not None else None
+        )
 
         # 1. extract images and videos from messages
         multi_modal_data = await self.process_vision_info(raw_prompt)
@@ -63,10 +68,12 @@ class DiffusionSingleTurnAgentLoop(AgentLoopBase):
             output = await self.server_manager.generate(
                 request_id=uuid4().hex,
                 prompt_ids=prompt_ids,
+                prompt_text=prompt_text,
                 sampling_params=sampling_params,
                 image_data=images,
                 video_data=videos,
                 negative_prompt_ids=negative_prompt_ids,
+                negative_prompt_text=negative_prompt_text,
             )
         if metrics.get("num_preempted") is None:
             metrics["num_preempted"] = output.num_preempted if output.num_preempted is not None else -1
