@@ -26,7 +26,7 @@ python3 -m verl_omni.trainer.diffusion.main_dpo \
     data.val_files=$pickscore_test_path \
     trainer.resume_mode=disable \
     data.train_batch_size=4 \
-    data.max_prompt_length=512 \
+    data.max_prompt_length=256 \
     actor_rollout_ref.model.path=$model_name \
     actor_rollout_ref.actor.diffusion_loss.dpo_beta=2000.0 \
     actor_rollout_ref.rollout.pipeline.height=256 \
