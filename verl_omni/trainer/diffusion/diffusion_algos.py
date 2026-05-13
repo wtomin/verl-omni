@@ -405,9 +405,5 @@ def compute_diffusion_dpo_fm_loss(
     dpo_metrics = {
         "actor/dpo_loss": dpo_loss.detach().item(),
         "actor/dpo_implicit_accuracy": implicit_accuracy.detach().item(),
-        "actor/mean_implicit_reward_chosen": implicit_reward_chosen.mean().detach().item(),
-        "actor/mean_implicit_reward_rejected": implicit_reward_rejected.mean().detach().item(),
-        "actor/mean_fm_mse_theta": theta_err.mean().detach().item(),
-        "actor/mean_fm_mse_ref": ref_err.mean().detach().item(),
     }
     return dpo_loss, dpo_metrics
