@@ -24,6 +24,7 @@ python3 -m verl_omni.trainer.diffusion.main_dpo \
     data=prompt_txt_data \
     data.train_files=$pickscore_train_path \
     data.val_files=$pickscore_test_path \
+    trainer.resume_mode=disable \
     data.train_batch_size=4 \
     data.max_prompt_length=256 \
     actor_rollout_ref.model.path=$model_name \
@@ -68,4 +69,4 @@ python3 -m verl_omni.trainer.diffusion.main_dpo \
     trainer.save_freq=30 \
     trainer.test_freq=30 \
     trainer.total_epochs=15 \
-    trainer.total_training_steps=300 "$@"
+    trainer.total_training_steps=1000 "$@"
