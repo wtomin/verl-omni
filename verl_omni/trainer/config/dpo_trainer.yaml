@@ -197,7 +197,7 @@ data:
   dataloader_num_workers: 0
 
   # Maximum number of training samples
-  train_max_samples: 1024
+  train_max_samples: -1
 
   # Maximum number of validation samples
   val_max_samples: 100
