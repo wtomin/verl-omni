@@ -34,7 +34,7 @@ from vllm.entrypoints.openai.api_server import build_app
 from vllm_omni.engine.arg_utils import OmniEngineArgs
 from vllm_omni.entrypoints import AsyncOmni
 from vllm_omni.entrypoints.openai.api_server import omni_init_app_state
-from vllm_omni.inputs.data import OmniCustomPrompt, OmniDiffusionSamplingParams
+from vllm_omni.inputs.data import OmniDiffusionSamplingParams
 from vllm_omni.lora.request import LoRARequest
 from vllm_omni.outputs import OmniRequestOutput
 
@@ -129,9 +129,11 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         prompt_ids: list[int],
         sampling_params: dict[str, Any],
         request_id: str,
+        prompt_text: Optional[str] = None,
         image_data: Optional[list[Any]] = None,
         video_data: Optional[list[Any]] = None,
         negative_prompt_ids: Optional[list[int]] = None,
+        negative_prompt_text: Optional[str] = None,
         priority: int = 0,
     ) -> DiffusionOutput:
         """Generate sequence with token-in-image-out."""
@@ -153,10 +155,15 @@ class vLLMOmniHttpServer(vLLMHttpServer):
                     lora_name=VLLM_LORA_NAME, lora_int_id=VLLM_LORA_INT_ID, lora_path=VLLM_LORA_PATH
                 )
 
-        # Build OmniCustomPrompt with pre-tokenized IDs
-        custom_prompt: OmniCustomPrompt = {"prompt_ids": prompt_ids}
+        # Keep token ids for custom rollout pipelines and text for built-in
+        # vLLM-Omni diffusion pipelines such as SD3.
+        custom_prompt: dict[str, Any] = {"prompt_ids": prompt_ids}
+        if prompt_text is not None:
+            custom_prompt["prompt"] = prompt_text
         if negative_prompt_ids is not None:
             custom_prompt["negative_prompt_ids"] = negative_prompt_ids
+        if negative_prompt_text is not None:
+            custom_prompt["negative_prompt"] = negative_prompt_text
         if multi_modal_data:
             custom_prompt["extra_args"] = {"multi_modal_data": multi_modal_data}
 
