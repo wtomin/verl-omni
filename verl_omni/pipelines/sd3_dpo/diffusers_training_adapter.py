@@ -50,7 +50,7 @@ def _configure_sd3_scheduler(
     scheduler.set_timesteps(num_inference_steps, device=device)
 
 
-@DiffusionModelBase.register("StableDiffusion3Pipeline")
+@DiffusionModelBase.register("StableDiffusion3Pipeline", algorithm="dpo")
 class SD3Adapter(DiffusionModelBase):
     """Training adapter for Stable Diffusion 3.x (e.g. SD3.0, SD3.5) diffusion models.
 
@@ -59,8 +59,8 @@ class SD3Adapter(DiffusionModelBase):
     configuration, model-input construction, and the forward/sampling step
     used during RL training (e.g. DPO, FlowGRPO).
 
-    Registered under ``"StableDiffusion3Pipeline"`` so it is automatically selected
-    when ``DiffusionModelConfig.architecture`` matches that name.
+    Registered under ``("StableDiffusion3Pipeline", "dpo")`` so it is automatically
+    selected when ``DiffusionModelConfig.architecture`` and ``algorithm`` match.
     """
 
     @staticmethod

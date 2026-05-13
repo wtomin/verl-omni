@@ -18,6 +18,9 @@ model_type: diffusion_model
 # Must match registered pipeline name (see pipelines/sd3); avoid relying on remote model_index when set here
 architecture: StableDiffusion3Pipeline
 
+# Algorithm registry key for the SD3 DPO adapter
+algorithm: dpo
+
 # path to the huggingface tokenizer. In case it is not the same as path
 tokenizer_path: null
 
