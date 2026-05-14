@@ -25,8 +25,8 @@ use_shm: False
 # Whether to trust remote code.
 trust_remote_code: False
 
-# Custom chat template. SD3 DPO uses raw prompt text, so keep this disabled.
-custom_chat_template: null
+# custom chat template for the model
+custom_chat_template: "{% for message in messages %}{{ message['content'] }}{% endfor %}"
 
 # Import SD3 DPO adapter registrations for training.
 external_lib: verl_omni.pipelines.sd3_dpo
