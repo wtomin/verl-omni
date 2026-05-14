@@ -106,6 +106,45 @@ def compute_advantage(
     return data
 
 
+def select_dpo_pairs(batch: DataProto) -> DataProto:
+    """Keep only highest- and lowest-reward samples per prompt group for DPO."""
+    sample_level_scores = batch.batch["sample_level_scores"]
+    scores = sample_level_scores.squeeze(-1) if sample_level_scores.ndim > 1 else sample_level_scores
+    uid = batch.non_tensor_batch.get("uid", None)
+
+    groups: dict[Any, list[int]] = defaultdict(list)
+    if uid is None:
+        groups[None] = list(range(scores.shape[0]))
+    else:
+        for i, group_id in enumerate(uid):
+            groups[group_id].append(i)
+
+    keep_indices: list[int] = []
+    for group_indices in groups.values():
+        if len(group_indices) < 2:
+            continue
+        group_tensor = torch.tensor(group_indices, device=scores.device, dtype=torch.long)
+        group_scores = scores[group_tensor]
+        ordered = torch.argsort(group_scores, descending=True)
+        keep_indices.append(group_indices[ordered[0].item()])
+        keep_indices.append(group_indices[ordered[-1].item()])
+
+    if not keep_indices:
+        raise ValueError("DPO requires at least one prompt group with two or more scored samples.")
+
+    non_tensor_batch = {}
+    for key, value in batch.non_tensor_batch.items():
+        try:
+            non_tensor_batch[key] = value[keep_indices]
+        except TypeError:
+            non_tensor_batch[key] = np.asarray(value, dtype=object)[keep_indices]
+    return DataProto(
+        batch=batch.batch[keep_indices],
+        non_tensor_batch=non_tensor_batch,
+        meta_info=batch.meta_info,
+    )
+
+
 class RayFlowGRPOTrainer:
     """Distributed Flow-GRPO trainer using Ray for scalable reinforcement learning.
 
@@ -819,11 +858,13 @@ class RayFlowGRPOTrainer:
         batch_td = batch.to_tensordict()
         # step 2: convert from padding to no-padding
         batch_td = embeds_padding_2_no_padding(batch_td)
+        is_dpo = self.config.algorithm.adv_estimator == DiffusionAdvantageEstimator.DPO.value
         ppo_mini_batch_size = self.config.actor_rollout_ref.actor.ppo_mini_batch_size
-        ppo_mini_batch_size = ppo_mini_batch_size * self.config.actor_rollout_ref.rollout.n
+        rollout_multiplier = 2 if is_dpo else self.config.actor_rollout_ref.rollout.n
+        ppo_mini_batch_size = ppo_mini_batch_size * rollout_multiplier
         ppo_epochs = self.config.actor_rollout_ref.actor.ppo_epochs
         seed = self.config.actor_rollout_ref.actor.data_loader_seed
-        shuffle = self.config.actor_rollout_ref.actor.shuffle
+        shuffle = False if is_dpo else self.config.actor_rollout_ref.actor.shuffle
         tu.assign_non_tensor(
             batch_td,
             global_batch_size=ppo_mini_batch_size,
@@ -985,7 +1026,9 @@ class RayFlowGRPOTrainer:
                         if reward_extra_infos_dict:
                             batch.non_tensor_batch.update({k: np.array(v) for k, v in reward_extra_infos_dict.items()})
 
-                        if not is_dpo:
+                        if is_dpo:
+                            batch = select_dpo_pairs(batch)
+                        else:
                             num_timesteps = batch.batch["old_log_probs"].shape[1]
                             batch.batch["sample_level_rewards"] = batch.batch["sample_level_scores"].expand(
                                 -1, num_timesteps

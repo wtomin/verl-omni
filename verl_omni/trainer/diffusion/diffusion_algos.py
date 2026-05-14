@@ -362,37 +362,26 @@ def compute_diffusion_loss_dpo(
     index: Optional[np.ndarray] = None,
     ref_mse: Optional[torch.Tensor] = None,
 ) -> tuple[torch.Tensor, dict[str, Any]]:
-    """Compute pairwise DPO loss from per-sample flow-matching MSE."""
+    """Compute DPO loss from adjacent ``chosen, rejected`` sample pairs."""
     assert config is not None
     assert isinstance(config, DiffusionActorConfig)
 
     scores = sample_level_scores.squeeze(-1) if sample_level_scores.ndim > 1 else sample_level_scores
-    groups: dict[Any, list[int]] = defaultdict(list)
-    if index is None:
-        groups[None] = list(range(scores.shape[0]))
-    else:
-        for i, group_id in enumerate(index):
-            groups[group_id].append(i)
+    if scores.shape[0] < 2 or scores.shape[0] % 2 != 0:
+        raise ValueError("DPO loss expects an even batch of adjacent chosen/rejected pairs.")
+    if index is not None and not np.all(index[0::2] == index[1::2]):
+        raise ValueError("DPO loss expects each adjacent chosen/rejected pair to share the same prompt uid.")
 
-    chosen_indices = []
-    rejected_indices = []
-    for group_indices in groups.values():
-        if len(group_indices) < 2:
-            continue
-        group_tensor = torch.tensor(group_indices, device=scores.device, dtype=torch.long)
-        group_scores = scores[group_tensor]
-        chosen_indices.append(group_tensor[torch.argmax(group_scores)])
-        rejected_indices.append(group_tensor[torch.argmin(group_scores)])
+    chosen_scores = scores[0::2]
+    rejected_scores = scores[1::2]
+    if torch.any(chosen_scores < rejected_scores).item():
+        raise ValueError("DPO loss expects each chosen sample reward to be >= its rejected pair reward.")
 
-    if not chosen_indices:
-        raise ValueError("DPO requires at least one prompt group with two or more scored samples.")
-
-    chosen = torch.stack(chosen_indices)
-    rejected = torch.stack(rejected_indices)
-
-    policy_logratio = policy_mse[rejected] - policy_mse[chosen]
+    policy_chosen_mse = policy_mse[0::2]
+    policy_rejected_mse = policy_mse[1::2]
+    policy_logratio = policy_rejected_mse - policy_chosen_mse
     if ref_mse is not None:
-        ref_logratio = ref_mse[rejected] - ref_mse[chosen]
+        ref_logratio = ref_mse[1::2] - ref_mse[0::2]
     else:
         ref_logratio = torch.zeros_like(policy_logratio)
 
