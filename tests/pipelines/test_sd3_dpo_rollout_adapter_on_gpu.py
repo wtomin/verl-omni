@@ -63,17 +63,23 @@ def _server_sampling_params(sampling_params: dict) -> OmniDiffusionSamplingParam
     return OmniDiffusionSamplingParams(**sampling_kwargs)
 
 
+def _assert_cpu_tensor(tensor: torch.Tensor | None) -> None:
+    assert tensor is not None
+    assert tensor.device.type == "cpu"
+
+
 async def _run_sd3_dpo_pipeline_full_weights_accepts_async_server_request():
     prompt = (
         "a cinematic photo of a red panda astronaut standing on the moon, "
         "soft rim lighting, detailed space suit, sharp focus"
     )
+    negative_prompt = "blurry, low quality, distorted anatomy, watermark"
     sampling_params = _server_sampling_params(
         {
             "height": 256,
             "width": 256,
             "num_inference_steps": 2,
-            "guidance_scale": 1.0,
+            "guidance_scale": 4.0,
             "max_sequence_length": 256,
             "seed": 1234,
             "logprobs": False,
@@ -91,7 +97,7 @@ async def _run_sd3_dpo_pipeline_full_weights_accepts_async_server_request():
 
         final_output = None
         async for output in engine.generate(
-            prompt=_server_custom_prompt(prompt, negative_prompt=""),
+            prompt=_server_custom_prompt(prompt, negative_prompt=negative_prompt),
             request_id=f"sd3_dpo_{uuid4().hex[:8]}",
             sampling_params_list=[sampling_params],
             output_modalities=["image"],
@@ -105,8 +111,11 @@ async def _run_sd3_dpo_pipeline_full_weights_accepts_async_server_request():
     assert custom_output.get("image_latents") is not None
     assert custom_output.get("prompt_embeds") is not None
     assert custom_output.get("pooled_prompt_embeds") is not None
-    assert custom_output.get("negative_prompt_embeds") is None
-    assert custom_output.get("negative_pooled_prompt_embeds") is None
+    _assert_cpu_tensor(custom_output.get("image_latents"))
+    _assert_cpu_tensor(custom_output.get("prompt_embeds"))
+    _assert_cpu_tensor(custom_output.get("pooled_prompt_embeds"))
+    _assert_cpu_tensor(custom_output.get("negative_prompt_embeds"))
+    _assert_cpu_tensor(custom_output.get("negative_pooled_prompt_embeds"))
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="SD3 DPO full-weight rollout requires CUDA")
