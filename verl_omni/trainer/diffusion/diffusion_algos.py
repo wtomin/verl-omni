@@ -19,6 +19,7 @@ from typing import Any, Callable, Optional
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from omegaconf import DictConfig
 
 from verl_omni.workers.config import DiffusionActorConfig
@@ -74,6 +75,7 @@ class DiffusionAdvantageEstimator(str, Enum):
     """Advantage estimators specific to diffusion-based training."""
 
     FLOW_GRPO = "flow_grpo"
+    DPO = "dpo"
 
 
 DIFFUSION_ADV_ESTIMATOR_REGISTRY: dict[str, Any] = {}
@@ -186,6 +188,16 @@ def compute_flow_grpo_outcome_advantage(
                 scores[i] = scores[i] - id2mean[index[i]]
 
     return scores, scores
+
+
+@register_diffusion_adv_est(DiffusionAdvantageEstimator.DPO)
+def compute_dpo_noop_advantage(
+    sample_level_rewards: torch.Tensor,
+    **kwargs,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """DPO does not use rollout advantages; return rewards unchanged for compatibility."""
+    del kwargs
+    return sample_level_rewards, sample_level_rewards
 
 
 @register_diffusion_loss("flow_grpo")
@@ -339,6 +351,61 @@ def compute_diffusion_loss_grpo_guard(
         "actor/ratio_std": ratio_std.detach().item(),
     }
     return pg_loss, pg_metrics
+
+
+@register_diffusion_loss("dpo")
+def compute_diffusion_loss_dpo(
+    policy_mse: torch.Tensor,
+    sample_level_scores: torch.Tensor,
+    config: Optional[DictConfig | DiffusionActorConfig] = None,
+    *,
+    index: Optional[np.ndarray] = None,
+    ref_mse: Optional[torch.Tensor] = None,
+) -> tuple[torch.Tensor, dict[str, Any]]:
+    """Compute pairwise DPO loss from per-sample flow-matching MSE."""
+    assert config is not None
+    assert isinstance(config, DiffusionActorConfig)
+
+    scores = sample_level_scores.squeeze(-1) if sample_level_scores.ndim > 1 else sample_level_scores
+    groups: dict[Any, list[int]] = defaultdict(list)
+    if index is None:
+        groups[None] = list(range(scores.shape[0]))
+    else:
+        for i, group_id in enumerate(index):
+            groups[group_id].append(i)
+
+    chosen_indices = []
+    rejected_indices = []
+    for group_indices in groups.values():
+        if len(group_indices) < 2:
+            continue
+        group_tensor = torch.tensor(group_indices, device=scores.device, dtype=torch.long)
+        group_scores = scores[group_tensor]
+        chosen_indices.append(group_tensor[torch.argmax(group_scores)])
+        rejected_indices.append(group_tensor[torch.argmin(group_scores)])
+
+    if not chosen_indices:
+        raise ValueError("DPO requires at least one prompt group with two or more scored samples.")
+
+    chosen = torch.stack(chosen_indices)
+    rejected = torch.stack(rejected_indices)
+
+    policy_logratio = policy_mse[rejected] - policy_mse[chosen]
+    if ref_mse is not None:
+        ref_logratio = ref_mse[rejected] - ref_mse[chosen]
+    else:
+        ref_logratio = torch.zeros_like(policy_logratio)
+
+    beta = config.diffusion_loss.dpo_beta
+    logits = beta * (policy_logratio - ref_logratio)
+    dpo_loss = -F.logsigmoid(logits).mean()
+
+    with torch.no_grad():
+        metrics = {
+            "actor/dpo_loss": dpo_loss.detach().item(),
+            "actor/dpo_accuracy": (policy_logratio > ref_logratio).float().mean().detach().item(),
+        }
+    return dpo_loss, metrics
 
 
 def kl_penalty_image(
