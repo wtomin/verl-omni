@@ -96,6 +96,7 @@ def _build_rows(
                     "index": index,
                     "line_number": line_number,
                     "raw_prompt": prompt_text,
+                    "raw_negative_prompt": negative_prompt,
                 },
             }
         )
