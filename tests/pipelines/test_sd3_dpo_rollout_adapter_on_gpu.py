@@ -20,6 +20,7 @@ Hub during local runs.
 
 from __future__ import annotations
 
+import asyncio
 import os
 from contextlib import ExitStack
 from uuid import uuid4
@@ -62,9 +63,7 @@ def _server_sampling_params(sampling_params: dict) -> OmniDiffusionSamplingParam
     return OmniDiffusionSamplingParams(**sampling_kwargs)
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="SD3 DPO full-weight rollout requires CUDA")
-@pytest.mark.asyncio
-async def test_sd3_dpo_pipeline_full_weights_accepts_async_server_request():
+async def _run_sd3_dpo_pipeline_full_weights_accepts_async_server_request():
     prompt = (
         "a cinematic photo of a red panda astronaut standing on the moon, "
         "soft rim lighting, detailed space suit, sharp focus"
@@ -108,3 +107,8 @@ async def test_sd3_dpo_pipeline_full_weights_accepts_async_server_request():
     assert custom_output.get("pooled_prompt_embeds") is not None
     assert custom_output.get("negative_prompt_embeds") is None
     assert custom_output.get("negative_pooled_prompt_embeds") is None
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="SD3 DPO full-weight rollout requires CUDA")
+def test_sd3_dpo_pipeline_full_weights_accepts_async_server_request():
+    asyncio.run(_run_sd3_dpo_pipeline_full_weights_accepts_async_server_request())
