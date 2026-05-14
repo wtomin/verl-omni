@@ -439,8 +439,6 @@ class QwenImagePipelineWithLogProb(QwenImagePipeline):
             num_channels_latents,
             height,
             width,
-            prompt_embeds.dtype,
-            self.device,
             generator,
             latents,
         )
