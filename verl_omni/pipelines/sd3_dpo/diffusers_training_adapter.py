@@ -141,3 +141,46 @@ class StableDiffusion3DPO(DiffusionModelBase):
         mse = F.mse_loss(model_pred.float(), target.float(), reduction="none")
         reduce_dims = tuple(range(1, mse.ndim))
         return mse.mean(dim=reduce_dims), model_pred
+
+    @classmethod
+    def forward_dpo_step(
+        cls,
+        module: ModelMixin,
+        scheduler: SchedulerMixin,
+        model_config: DiffusionModelConfig,
+        micro_batch: TensorDict,
+    ) -> dict[str, torch.Tensor]:
+        """Run one SD3 flow-matching training step for DPO."""
+        latents = micro_batch.get("image_latents", None)
+
+        if latents is None:
+            raise KeyError("SD3 DPO training requires `image_latents` in the micro batch.")
+
+        noise = torch.randn_like(latents)
+        timestep_indices = torch.randint(
+            0,
+            len(scheduler.timesteps),
+            (latents.shape[0],),
+            device=latents.device,
+        )
+        timesteps = scheduler.timesteps.to(device=latents.device)[timestep_indices]
+        sigmas = scheduler.sigmas.to(device=latents.device, dtype=latents.dtype)[timestep_indices]
+        sigmas = sigmas.view(-1, *([1] * (latents.ndim - 1)))
+
+        noisy_latents = (1.0 - sigmas) * latents + sigmas * noise
+        target = noise - latents
+
+        model_inputs, _ = cls.prepare_model_inputs(
+            module=module,
+            model_config=model_config,
+            latents=noisy_latents,
+            timesteps=timesteps,
+            prompt_embeds=micro_batch["prompt_embeds"],
+            prompt_embeds_mask=micro_batch.get("prompt_embeds_mask", None),
+            negative_prompt_embeds=micro_batch.get("negative_prompt_embeds", None),
+            negative_prompt_embeds_mask=micro_batch.get("negative_prompt_embeds_mask", None),
+            micro_batch=micro_batch,
+            step=0,
+        )
+        mse, _ = cls.forward_mse(module=module, model_inputs=model_inputs, target=target)
+        return {"mse": mse, "timesteps": timesteps}
