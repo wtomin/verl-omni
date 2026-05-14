@@ -148,6 +148,8 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         image_data: Optional[list[Any]] = None,
         video_data: Optional[list[Any]] = None,
         negative_prompt_ids: Optional[list[int]] = None,
+        prompt: Optional[str] = None,
+        negative_prompt: Optional[str] = None,
         priority: int = 0,
     ) -> DiffusionOutput:
         """Generate sequence with token-in-image-out."""
@@ -169,7 +171,9 @@ class vLLMOmniHttpServer(vLLMHttpServer):
                     lora_name=VLLM_LORA_NAME, lora_int_id=VLLM_LORA_INT_ID, lora_path=VLLM_LORA_PATH
                 )
 
-        # Build OmniCustomPrompt with pre-tokenized IDs
+        # Build OmniCustomPrompt with pre-tokenized IDs. Raw text prompts are
+        # also forwarded for pipelines such as SD3 whose tokenizer should not
+        # receive a chat template.
         custom_prompt: OmniCustomPrompt = {"prompt_ids": prompt_ids}
         if negative_prompt_ids is not None:
             custom_prompt["negative_prompt_ids"] = negative_prompt_ids
@@ -185,6 +189,12 @@ class vLLMOmniHttpServer(vLLMHttpServer):
             else:
                 extra_args[k] = v
         sampling_kwargs["extra_args"] = extra_args
+
+        if prompt is not None:
+            custom_prompt["prompt"] = prompt
+        if negative_prompt is not None:
+            custom_prompt["negative_prompt"] = negative_prompt
+
         if lora_request is not None:
             sampling_kwargs["lora_request"] = lora_request
         diffusion_sampling_params = OmniDiffusionSamplingParams(**sampling_kwargs)
@@ -215,19 +225,27 @@ class vLLMOmniHttpServer(vLLMHttpServer):
 
         all_latents = mm_output.get("all_latents")
         all_timesteps = mm_output.get("all_timesteps")
+        image_latents = mm_output.get("image_latents")
         prompt_embeds = mm_output.get("prompt_embeds")
         prompt_embeds_mask = mm_output.get("prompt_embeds_mask")
+        pooled_prompt_embeds = mm_output.get("pooled_prompt_embeds")
         negative_prompt_embeds = mm_output.get("negative_prompt_embeds")
         negative_prompt_embeds_mask = mm_output.get("negative_prompt_embeds_mask")
+        negative_pooled_prompt_embeds = mm_output.get("negative_pooled_prompt_embeds")
 
         extra_fields = {
             "all_latents": all_latents[0] if all_latents is not None else None,
             "all_timesteps": all_timesteps[0] if all_timesteps is not None else None,
+            "image_latents": image_latents[0] if image_latents is not None else None,
             "prompt_embeds": prompt_embeds[0] if prompt_embeds is not None else None,
             "prompt_embeds_mask": prompt_embeds_mask[0] if prompt_embeds_mask is not None else None,
+            "pooled_prompt_embeds": pooled_prompt_embeds[0] if pooled_prompt_embeds is not None else None,
             "negative_prompt_embeds": negative_prompt_embeds[0] if negative_prompt_embeds is not None else None,
             "negative_prompt_embeds_mask": negative_prompt_embeds_mask[0]
             if negative_prompt_embeds_mask is not None
+            else None,
+            "negative_pooled_prompt_embeds": negative_pooled_prompt_embeds[0]
+            if negative_pooled_prompt_embeds is not None
             else None,
             "global_steps": self.global_steps,
         }

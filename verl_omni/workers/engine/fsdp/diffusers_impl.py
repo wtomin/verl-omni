@@ -59,6 +59,7 @@ from verl.workers.engine.base import BaseEngine, BaseEngineCtx, EngineRegistry
 from verl.workers.engine.fsdp.utils import create_device_mesh, get_sharding_strategy
 from verl.workers.engine.utils import enable_full_determinism, prepare_micro_batches
 
+from verl_omni.pipelines.model_base import DiffusionModelBase
 from verl_omni.pipelines.utils import build_scheduler, forward_and_sample_previous_step, prepare_model_inputs
 from verl_omni.utils.fsdp_utils import collect_lora_params
 from verl_omni.workers.config import DiffusionModelConfig
@@ -474,7 +475,8 @@ class DiffusersFSDPEngine(BaseEngine):
     def forward_backward_batch(
         self, data: TensorDict, loss_function: Callable, forward_only: bool = False
     ) -> list[TensorDict]:
-        num_timesteps = data["all_timesteps"].shape[1]
+        is_dpo = self.model_config.algorithm == "dpo"
+        num_timesteps = 1 if is_dpo else data["all_timesteps"].shape[1]
         tu.assign_non_tensor(data, sp_size=self.ulysses_sequence_parallel_size)
         tu.assign_non_tensor(data, use_dynamic_bsz=False)
 
@@ -492,11 +494,12 @@ class DiffusersFSDPEngine(BaseEngine):
             micro_batch = micro_batch.to(get_device_id())
             tu.assign_non_tensor(micro_batch, gradient_accumulation_steps=gradient_accumulation_steps)
             meta_info_lst = {"model_output": [], "loss": [], "metrics": []}
-            # Forward and backward for each timestep
             with ctx:
-                for step in range(num_timesteps):
-                    loss, meta_info = self.forward_step(
-                        micro_batch, loss_function=loss_function, forward_only=forward_only, step=step
+                if is_dpo:
+                    # DPO is a one-shot flow-matching objective over final image latents,
+                    # not a reversed-sampling objective over every rollout timestep.
+                    loss, meta_info = self.forward_dpo_step(
+                        micro_batch, loss_function=loss_function, forward_only=forward_only
                     )
 
                     if not forward_only:
@@ -504,6 +507,18 @@ class DiffusersFSDPEngine(BaseEngine):
 
                     for key, val in meta_info.items():
                         meta_info_lst[key].append(val)
+                else:
+                    # Forward and backward for each timestep
+                    for step in range(num_timesteps):
+                        loss, meta_info = self.forward_step(
+                            micro_batch, loss_function=loss_function, forward_only=forward_only, step=step
+                        )
+
+                        if not forward_only:
+                            loss.backward()
+
+                        for key, val in meta_info.items():
+                            meta_info_lst[key].append(val)
 
             output_lst.append(meta_info_lst)
 
@@ -544,6 +559,44 @@ class DiffusersFSDPEngine(BaseEngine):
         }
 
         return output
+
+    def forward_dpo_step(self, micro_batch: TensorDict, loss_function, forward_only):
+        model_cls = DiffusionModelBase.get_class(self.model_config)
+        if not hasattr(model_cls, "forward_dpo_step"):
+            raise NotImplementedError(f"{model_cls.__name__} must implement `forward_dpo_step` for algorithm='dpo'.")
+
+        model_output = model_cls.forward_dpo_step(
+            module=self.module,
+            scheduler=self.scheduler,
+            model_config=self.model_config,
+            micro_batch=micro_batch,
+        )
+
+        if loss_function is not None:
+            data = tu.get_tensordict({"sample_level_scores": micro_batch["sample_level_scores"]})
+            uid = tu.get_non_tensor_data(micro_batch, "uid", default=None)
+            tu.assign_non_tensor(
+                data,
+                gradient_accumulation_steps=tu.get_non_tensor_data(
+                    micro_batch, "gradient_accumulation_steps", default=None
+                ),
+                sp_size=tu.get_non_tensor_data(micro_batch, "sp_size", default=None),
+            )
+            if uid is not None:
+                tu.assign_non_tensor(data, uid=uid)
+            loss, metrics = loss_function(model_output=model_output, data=data, dp_group=self.get_data_parallel_group())
+        else:
+            assert forward_only, "forward_only must be True when loss_function is None"
+            loss = torch.tensor(1.0, device=device_name)
+            metrics = {}
+
+        output = {
+            "model_output": model_output,
+            "loss": loss.detach().item(),
+            "metrics": metrics,
+        }
+
+        return loss, output
 
     @staticmethod
     def _unpad_nested_embeds(embeds: torch.Tensor, mask: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
