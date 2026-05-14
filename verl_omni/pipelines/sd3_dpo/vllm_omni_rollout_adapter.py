@@ -177,6 +177,8 @@ class StableDiffusion3DPOPipeline(StableDiffusion3Pipeline):
             num_channels_latents,
             height,
             width,
+            prompt_embeds.dtype,  # might be removed after vllm-omni 0.18.0
+            self.device,  # might be removed after vllm-omni 0.18.0
             generator,
             latents,
         )
