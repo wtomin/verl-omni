@@ -1,0 +1,273 @@
+# DPO Training Configuration for SD3 (Stable Diffusion 3.x)
+# Format checks enforced on CI:
+# 1. Comments must appear above each field.
+# 2. There must be a blank line between each field.
+# 3. In-line comments (after a field on the same line) are not allowed.
+# 4. Indentation level is respected for nested fields.
+
+# specify the default per-component configs
+defaults:
+
+  - diffusion/model_engine: dp_diffusion
+
+  # actor_rollout_ref.actor: trainer/config/diffusion/actor/dp_diffusion_actor.yaml
+  - diffusion/actor@actor_rollout_ref.actor: ${diffusion/model_engine}_actor
+
+  # data: trainer/config/data/prompt_txt_data.yaml (prompt-only parquet rows)
+  - data@data: prompt_txt_data
+
+  # Reference model config (required for DPO)
+  - diffusion/ref@actor_rollout_ref.ref: ${diffusion/model_engine}_ref
+
+  # Rollout model config
+  - diffusion/rollout@actor_rollout_ref.rollout: dpo_sd35_rollout
+
+  # Model config for SD3.5
+  - diffusion/model@actor_rollout_ref.model: dpo_sd35_model
+
+  # Reward config (optional, for validation)
+  - reward@reward: reward
+
+  # load the reference default config, then apply the fields in the current yaml
+  # self config override anything above
+  - _self_
+
+# config for actor, rollout and reference model
+actor_rollout_ref:
+
+  # Explicit FM-DPO loss (pairwise logistic on flow-matching MSE gaps vs reference policy).
+  actor:
+
+    diffusion_loss:
+
+      loss_mode: dpo
+
+      dpo_beta: 2000.0
+
+  # Whether it's a hybrid engine, currently only supports hybrid engine
+  hybrid_engine: true
+
+# config for the DPO algorithm
+algorithm:
+
+  # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+  _target_: verl_omni.trainer.config.DiffusionAlgoConfig
+
+  # Advantage estimator type: "dpo"
+  adv_estimator: dpo
+
+  # Whether to normalize advantages by std
+  norm_adv_by_std_in_grpo: false
+
+  # Whether to use global std for advantage normalization
+  global_std: false
+
+  # Whether to bypass old log-prob recomputation
+  bypass_mode: true
+
+# config for the trainer
+trainer:
+
+  # Number of epochs in training
+  total_epochs: 30
+
+  # Total training steps (can be set explicitly or derived from epochs)
+  total_training_steps: null
+
+  # Project name for experiment tracking (e.g., wandb)
+  project_name: verl_dpo_examples
+
+  # Experiment name for run identification
+  experiment_name: sd3_dpo
+
+  # Logging backends to use: "console", "wandb", etc.
+  logger: ["console"]
+
+  # Number of generations to log during validation
+  log_val_generations: 0
+
+  # Directory for logging rollout data; no dump if null
+  rollout_data_dir: null
+
+  # Directory for logging validation data; no dump if null
+  validation_data_dir: null
+
+  # Number of nodes used in the training
+  nnodes: 1
+
+  # Number of GPUs per node
+  n_gpus_per_node: 1
+
+  # Save frequency (by iteration) for model checkpoints
+  save_freq: 10
+
+  # Extra safety window before Elastic Server Instance expiration when forcing checkpoints
+  esi_redundant_time: 0
+
+  # Resume mode: "auto", "disable", or "resume_path"
+  resume_mode: auto
+
+  # Path to resume training from (only used when resume_mode is "resume_path")
+  resume_from_path: null
+
+  # Whether to run validation before training begins
+  val_before_train: true
+
+  # Whether to run validation only
+  val_only: false
+
+  # Validation frequency (in training iterations)
+  test_freq: 10
+
+  # Default path to distributed filesystem for saving checkpoints
+  default_hdfs_dir: null
+
+  # Whether to delete local checkpoints after loading
+  del_local_ckpt_after_load: false
+
+  # Default local directory for saving checkpoints
+  default_local_dir: checkpoints/${trainer.project_name}/${trainer.experiment_name}
+
+  # Timeout (in seconds) for Ray worker to wait for registration
+  ray_wait_register_center_timeout: 300
+
+  # Device to run training on (e.g., "cuda", "cpu")
+  device: cuda
+
+# Profiler configs (mirrors verl/trainer/config/ppo_trainer.yaml `global_profiler`).
+# verl-omni does not support NPU; only nsys, torch and torch_memory tools are supported.
+global_profiler:
+
+  # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+  _target_: verl.utils.profiler.ProfilerConfig
+
+  # Profiling tool: choose between nsys, torch, torch_memory
+  tool: null
+
+  # Steps at which profiling should be performed (e.g. [1, 2, 5]). null disables profiling.
+  steps: null
+
+  # Whether to combine continuous steps into one database.
+  # If True, worker.profiler.discrete must be False, [1,2] in one db, [5] in another.
+  # If False, [1] in one, [2] in another, [5] in another.
+  profile_continuous_steps: False
+
+  # Path to save profiling contents
+  save_path: "outputs/profile"
+
+  # Tool-specific global configurations.
+  # Override on the CLI via +global_profiler.global_tool_config.[tool].xxx=yyy
+  global_tool_config:
+
+    # NVIDIA Nsight Systems config
+    nsys:
+
+      # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+      _target_: verl.utils.profiler.config.NsightToolConfig
+
+      # True for each task has its own database, False for all tasks in one training step share one database.
+      discrete: False
+
+      # Controller-side Nsight Systems options. Must be set when global_profiler.steps is not null
+      # and global_profiler.tool == "nsys".
+      # See https://docs.nvidia.com/nsight-systems/UserGuide/index.html
+      controller_nsight_options:
+
+        # Select the API(s) to be traced.
+        trace: "cuda,nvtx,cublas,ucx"
+
+        # Track GPU memory usage by CUDA kernels. Must be string "true" or "false".
+        cuda-memory-usage: "true"
+
+        # CUDA graphs will be traced as a whole.
+        cuda-graph-trace: "graph"
+
+      # Worker-side Nsight Systems options. Must be set when using nsys with profile steps.
+      worker_nsight_options:
+
+        # Select the API(s) to be traced.
+        trace: "cuda,nvtx,cublas,ucx"
+
+        # Track GPU memory usage by CUDA kernels. Must be string "true" or "false".
+        cuda-memory-usage: "true"
+
+        # CUDA graphs will be traced as a whole.
+        cuda-graph-trace: "graph"
+
+        # Profiling only in a range of torch.cuda.profiler.start and stop. Do not change.
+        capture-range: "cudaProfilerApi"
+
+        # Specify desired behavior when a capture range ends.
+        # Valid values: "repeat-shutdown:n" or null.
+        capture-range-end: null
+
+        # Send signal to the target application's process group. Let the program exit by itself.
+        kill: none
+
+    # Torch CUDA memory snapshot dumping
+    torch_memory:
+
+      # Maximum number of allocation entries to record
+      trace_alloc_max_entries: 100_000
+
+      # Depth of the call stack to capture for each allocation
+      stack_depth: 32
+
+      # 'alloc': allocations only | 'state': state changes only | 'all': both.
+      context: "all"
+
+      # 'python': Python stacks | 'cpp': C++ stacks | 'all': both.
+      stacks: "all"
+
+      # Extra keyword arguments forwarded to torch.cuda.memory._record_memory_history.
+      kw_args: {}
+
+# configs related to ray
+ray_kwargs:
+
+  # configs related to ray initialization
+  ray_init:
+
+    # Number of CPUs for Ray. Use a fixed number instead of null when using SLURM.
+    num_cpus: null
+
+  # Path to save Ray timeline JSON for performance profiling (not a ray.init() argument).
+  timeline_json_file: null
+
+# data configuration
+data:
+
+  # Training data files
+  train_files: dataset/pickscore/train.parquet
+
+  # Validation data files
+  val_files: dataset/pickscore/test.parquet
+
+  # Batch size for generation (number of unique prompts per batch)
+  gen_batch_size: 4
+
+  # Batch size for training
+  train_batch_size: 4
+
+  # Number of K-repeated samples per prompt (for DPO pair formation)
+  k_samples: 4
+
+  # Data loader number of workers
+  dataloader_num_workers: 0
+
+  # Maximum number of training samples
+  train_max_samples: -1
+
+  # Maximum number of validation samples
+  val_max_samples: 100
+
+# reward configuration (PickScore for training / validation scoring)
+reward:
+
+  # Whether to use reward model
+  enable: true
+
+  # Reward model configuration
+  reward_model:
+    enable: true
+    model_path: "yuvalkirstain/PickScore_v1"

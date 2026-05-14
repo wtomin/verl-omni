@@ -1,0 +1,137 @@
+# defaults specify the default config from each component
+defaults:
+
+  # Base diffusion rollout config
+  - diffusion_rollout
+
+  # load the reference default config, then apply the fields in the current yaml
+  - _self_
+
+# Rollout engine name.
+name: vllm_omni
+
+# Rollout model dtype.
+dtype: bfloat16
+
+# Tensor parallel size for SD3.5 rollout.
+tensor_model_parallel_size: 1
+
+# Fraction of GPU memory used by vLLM-Omni.
+gpu_memory_utilization: 0.7
+
+# Number of rollout samples per prompt for DPO pair construction.
+n: ${oc.select:data.k_samples,4}
+
+# DPO does not require rollout log probabilities.
+calculate_log_probs: False
+
+# Import SD3 DPO rollout adapter registration.
+external_lib: verl_omni.pipelines.sd3_dpo
+
+# Pipeline configuration for SD3.5 DPO rollout.
+pipeline:
+
+  # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+  _target_: verl_omni.workers.config.diffusion.DiffusionPipelineConfig
+
+  # Image height for rollout.
+  height: 512
+
+  # Image width for rollout.
+  width: 512
+
+  # Number of SD3.5 inference steps.
+  num_inference_steps: 40
+
+  # DPO rollout defaults to no true CFG.
+  true_cfg_scale: 1.0
+
+  # Maximum SD3 text encoder sequence length.
+  max_sequence_length: 256
+
+  # SD3 guidance scale.
+  guidance_scale: 1.0
+
+# Validation sampling configuration.
+val_kwargs:
+
+  # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+  _target_: verl_omni.workers.config.diffusion.DiffusionSamplingConfig
+
+  # Number of validation samples per prompt.
+  n: 1
+
+  # Validation seed.
+  seed: 42
+
+  # Validation pipeline configuration.
+  pipeline:
+
+    # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+    _target_: verl_omni.workers.config.diffusion.DiffusionPipelineConfig
+
+    # Image height for validation.
+    height: ${oc.select:actor_rollout_ref.rollout.pipeline.height,512}
+
+    # Image width for validation.
+    width: ${oc.select:actor_rollout_ref.rollout.pipeline.width,512}
+
+    # Number of SD3.5 inference steps for validation.
+    num_inference_steps: ${oc.select:actor_rollout_ref.rollout.pipeline.num_inference_steps,40}
+
+    # DPO validation defaults to no true CFG.
+    true_cfg_scale: ${oc.select:actor_rollout_ref.rollout.pipeline.true_cfg_scale,1.0}
+
+    # Maximum SD3 text encoder sequence length.
+    max_sequence_length: ${oc.select:actor_rollout_ref.rollout.pipeline.max_sequence_length,256}
+
+    # SD3 guidance scale.
+    guidance_scale: ${oc.select:actor_rollout_ref.rollout.pipeline.guidance_scale,1.0}
+
+  # Validation algorithm placeholder.
+  algo:
+
+    # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+    _target_: verl_omni.workers.config.diffusion.DiffusionRolloutAlgoConfig
+
+    # SDE noise level is unused for DPO.
+    noise_level: 0.0
+
+    # SDE type placeholder.
+    sde_type: sde
+
+    # DPO does not select a denoising window.
+    sde_window_size: null
+
+    # DPO does not select a denoising window range.
+    sde_window_range: null
+
+# Rollout algorithm placeholder. DPO does not use SDE windows.
+algo:
+
+  # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+  _target_: verl_omni.workers.config.diffusion.DiffusionRolloutAlgoConfig
+
+  # SDE noise level is unused for DPO.
+  noise_level: 0.0
+
+  # SDE type placeholder.
+  sde_type: sde
+
+  # DPO does not select a denoising window.
+  sde_window_size: null
+
+  # DPO does not select a denoising window range.
+  sde_window_range: null
+
+# Agent loop configuration.
+agent:
+
+  # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+  _target_: verl.workers.config.AgentLoopConfig
+
+  # Number of rollout agent workers.
+  num_workers: 8
+
+  # Single-turn diffusion agent forwards raw prompt text to SD3.
+  default_agent_loop: diffusion_single_turn_agent
