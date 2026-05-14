@@ -498,7 +498,7 @@ class DiffusersFSDPEngine(BaseEngine):
                 if is_dpo:
                     # DPO is a one-shot flow-matching objective over final image latents,
                     # not a reversed-sampling objective over every rollout timestep.
-                    loss, meta_info = self.forward_dpo_step(
+                    loss, meta_info = self.forward_batch(
                         micro_batch, loss_function=loss_function, forward_only=forward_only
                     )
 
@@ -560,12 +560,12 @@ class DiffusersFSDPEngine(BaseEngine):
 
         return output
 
-    def forward_dpo_step(self, micro_batch: TensorDict, loss_function, forward_only):
+    def forward_batch(self, micro_batch: TensorDict, loss_function, forward_only):
         model_cls = DiffusionModelBase.get_class(self.model_config)
-        if not hasattr(model_cls, "forward_dpo_step"):
-            raise NotImplementedError(f"{model_cls.__name__} must implement `forward_dpo_step` for algorithm='dpo'.")
+        if not hasattr(model_cls, "forward_batch"):
+            raise NotImplementedError(f"{model_cls.__name__} must implement `forward_batch` for algorithm='dpo'.")
 
-        model_output = model_cls.forward_dpo_step(
+        model_output = model_cls.forward_batch(
             module=self.module,
             scheduler=self.scheduler,
             model_config=self.model_config,

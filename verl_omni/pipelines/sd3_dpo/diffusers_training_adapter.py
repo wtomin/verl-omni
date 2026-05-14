@@ -143,14 +143,14 @@ class StableDiffusion3DPO(DiffusionModelBase):
         return mse.mean(dim=reduce_dims), model_pred
 
     @classmethod
-    def forward_dpo_step(
+    def forward_batch(
         cls,
         module: ModelMixin,
         scheduler: SchedulerMixin,
         model_config: DiffusionModelConfig,
         micro_batch: TensorDict,
     ) -> dict[str, torch.Tensor]:
-        """Run one SD3 flow-matching training step for DPO."""
+        """Run one SD3 flow-matching training batch for DPO."""
         latents = micro_batch.get("image_latents", None)
 
         if latents is None:
