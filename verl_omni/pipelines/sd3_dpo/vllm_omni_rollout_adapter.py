@@ -29,6 +29,10 @@ __all__ = ["StableDiffusion3DPOPipeline"]
 logger = logging.getLogger(__file__)
 logger.setLevel(logging.INFO)
 
+def _maybe_to_cpu(value):
+    if isinstance(value, torch.Tensor):
+        return value.detach().cpu()
+    return value
 
 def _prompt_value(prompt: Any, *keys: str, default: str = "") -> str:
     """Extract a raw text prompt from vLLM-Omni custom prompt dictionaries."""
@@ -209,14 +213,15 @@ class StableDiffusion3DPOPipeline(StableDiffusion3Pipeline):
             image = self.vae.decode(decode_latents, return_dict=False)[0]
 
         return DiffusionOutput(
-            output=image,
+            output=_maybe_to_cpu(image),
             custom_output={
-                "image_latents": image_latents,
-                "prompt_embeds": prompt_embeds,
+                "image_latents": _maybe_to_cpu(image_latents),
+                "prompt_embeds": _maybe_to_cpu(prompt_embeds),
                 "prompt_embeds_mask": None,
-                "pooled_prompt_embeds": pooled_prompt_embeds,
-                "negative_prompt_embeds": negative_prompt_embeds if do_cfg else None,
+                "pooled_prompt_embeds": _maybe_to_cpu(pooled_prompt_embeds),
+                "negative_prompt_embeds": _maybe_to_cpu(negative_prompt_embeds) if do_cfg else None,
                 "negative_prompt_embeds_mask": None,
-                "negative_pooled_prompt_embeds": negative_pooled_prompt_embeds if do_cfg else None,
+                "negative_pooled_prompt_embeds": _maybe_to_cpu(negative_pooled_prompt_embeds) if do_cfg else None,
             },
         )
+   
