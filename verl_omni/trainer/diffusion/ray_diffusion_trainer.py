@@ -864,6 +864,11 @@ class RayFlowGRPOTrainer:
         out_td = self.actor_rollout_wg.materialize_dpo_flow_batch(batch_td)
         if out_td is None:
             return batch
+        required_keys = ("dpo_noise", "dpo_timesteps")
+        missing_keys = [key for key in required_keys if key not in out_td.keys()]
+        if missing_keys:
+            raise KeyError(f"materialize_dpo_flow_batch did not return required keys: {missing_keys}")
+        out_td = out_td.select(*required_keys)
         return batch.union(DataProto.from_tensordict(out_td))
 
     def _compute_dpo_ref_noise_pred(self, batch: DataProto) -> Optional[DataProto]:

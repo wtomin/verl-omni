@@ -439,7 +439,7 @@ class TrainingWorker(Worker, DistProfilerExtension):
             )
         materializer(data)
         if self.engine.is_mp_src_rank_with_outputs():
-            return data.cpu()
+            return data.select("dpo_noise", "dpo_timesteps").cpu()
         return None
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
