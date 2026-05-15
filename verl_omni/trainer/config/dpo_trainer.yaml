@@ -22,8 +22,8 @@ defaults:
   # Rollout model config
   - diffusion/rollout@actor_rollout_ref.rollout: dpo_sd35_rollout
 
-  # Model config for SD3.5
-  - diffusion/model@actor_rollout_ref.model: dpo_sd35_model
+  # Model config: reuse diffusion_model; DPO/SD3.5 fields under actor_rollout_ref.model
+  - diffusion/model@actor_rollout_ref.model: diffusion_model
 
   # Reward config (optional, for validation)
   - reward@reward: reward
@@ -43,6 +43,30 @@ actor_rollout_ref:
       loss_mode: dpo
 
       dpo_beta: 2000.0
+
+  # SD3.5 + DPO overrides (base schema from diffusion_model.yaml)
+  model:
+
+    # Stable Diffusion 3.5 Medium checkpoint
+    path: stabilityai/stable-diffusion-3.5-medium
+
+    # RL algorithm name
+    algorithm: dpo
+
+    # Pipeline architecture name from model_index.json
+    architecture: StableDiffusion3Pipeline
+
+    # Engine model type for diffusion DPO training
+    model_type: diffusion_dpo_model
+
+    # User-role captions only (parquet rows may include a synthetic system message)
+    custom_chat_template: "{% for message in messages %}{% if message['role'] == 'user' %}{{ message['content'] }}{% endif %}{% endfor %}"
+
+    # Import SD3 DPO adapter registrations for training
+    external_lib: verl_omni.pipelines.sd3_dpo
+
+    # LoRA rank for SD3 DPO training
+    lora_rank: 32
 
   # Whether it's a hybrid engine, currently only supports hybrid engine
   hybrid_engine: true
