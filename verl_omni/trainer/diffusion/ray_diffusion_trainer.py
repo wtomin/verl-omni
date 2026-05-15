@@ -851,6 +851,42 @@ class RayFlowGRPOTrainer:
         old_log_prob = tu.get_tensordict(old_log_prob_dict)
         return DataProto.from_tensordict(old_log_prob)
 
+    def _materialize_dpo_flow_batch(self, batch: DataProto) -> DataProto:
+        """Sample shared noise / timesteps / flow target for diffusion DPO (policy, ref, train use the same)."""
+        batch_td = batch.to_tensordict()
+        batch_td = embeds_padding_2_no_padding(batch_td)
+        tu.assign_non_tensor(
+            batch_td,
+            height=self.config.actor_rollout_ref.model.pipeline.height,
+            width=self.config.actor_rollout_ref.model.pipeline.width,
+            vae_scale_factor=self.config.actor_rollout_ref.model.get("vae_scale_factor", 8),
+        )
+        out_td = self.actor_rollout_wg.materialize_dpo_flow_batch(batch_td)
+        if out_td is None:
+            return batch
+        return batch.union(DataProto.from_tensordict(out_td))
+
+    def _compute_dpo_ref_noise_pred(self, batch: DataProto) -> Optional[DataProto]:
+        """Reference transformer output (e.g. flow-matching noise prediction)."""
+        batch_td = batch.to_tensordict()
+        batch_td = embeds_padding_2_no_padding(batch_td)
+        metadata = {
+            "compute_loss": False,
+            "height": self.config.actor_rollout_ref.model.pipeline.height,
+            "width": self.config.actor_rollout_ref.model.pipeline.width,
+            "vae_scale_factor": self.config.actor_rollout_ref.model.get("vae_scale_factor", 8),
+        }
+        if self.ref_in_actor:
+            metadata["no_lora_adapter"] = True
+        tu.assign_non_tensor(batch_td, **metadata)
+        if self.ref_in_actor:
+            output = self.actor_rollout_wg.compute_dpo_ref_noise_pred_via_actor_base(batch_td)
+        else:
+            output = self.ref_policy_wg.compute_dpo_ref_noise_pred(batch_td)
+        if output is None:
+            return None
+        return DataProto.from_tensordict(output)
+
     def _update_actor(self, batch: DataProto) -> DataProto:
         rollout_config = self.config.actor_rollout_ref.rollout
         batch.meta_info["multi_turn"] = rollout_config.multi_turn.enable
@@ -1012,11 +1048,10 @@ class RayFlowGRPOTrainer:
 
                         assert "old_log_probs" in batch.batch, f'"old_log_prob" not in {batch.batch.keys()=}'
 
-                    if self.use_reference_policy and not is_dpo:
-                        # compute reference log_prob
-                        with marked_timer(str(Role.RefPolicy), timing_raw, color="olive"):
-                            ref_log_prob = self._compute_ref_log_prob(batch)
-                            batch = batch.union(ref_log_prob)
+                        if self.use_reference_policy:
+                            with marked_timer(str(Role.RefPolicy), timing_raw, color="olive"):
+                                ref_log_prob = self._compute_ref_log_prob(batch)
+                                batch = batch.union(ref_log_prob)
 
                     with marked_timer("adv", timing_raw, color="brown"):
                         # we combine with rule-based rm
@@ -1046,6 +1081,14 @@ class RayFlowGRPOTrainer:
                                 global_std=self.config.algorithm.global_std,
                                 config=self.config.algorithm,
                             )
+
+                    if is_dpo:
+                        batch = self._materialize_dpo_flow_batch(batch)
+                        if self.use_reference_policy:
+                            with marked_timer(str(Role.RefPolicy), timing_raw, color="olive"):
+                                ref_dpo = self._compute_dpo_ref_noise_pred(batch)
+                                if ref_dpo is not None:
+                                    batch = batch.union(ref_dpo)
 
                     # update actor
                     with marked_timer("update_actor", timing_raw, color="red"):
