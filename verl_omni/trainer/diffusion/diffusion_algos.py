@@ -361,7 +361,7 @@ def compute_diffusion_loss_dpo(
     sample_level_scores: torch.Tensor,
     config: Optional[DictConfig | DiffusionActorConfig] = None,
     *,
-    index: Optional[np.ndarray] = None,
+    index: Optional[np.ndarray | torch.Tensor | list[Any]] = None,
 ) -> tuple[torch.Tensor, dict[str, Any]]:
     """Compute DPO loss from adjacent ``chosen, rejected`` sample pairs."""
     assert config is not None
@@ -370,8 +370,13 @@ def compute_diffusion_loss_dpo(
     scores = sample_level_scores.squeeze(-1) if sample_level_scores.ndim > 1 else sample_level_scores
     if scores.shape[0] < 2 or scores.shape[0] % 2 != 0:
         raise ValueError("DPO loss expects an even batch of adjacent chosen/rejected pairs.")
-    if index is not None and not np.all(index[0::2] == index[1::2]):
-        raise ValueError("DPO loss expects each adjacent chosen/rejected pair to share the same prompt uid.")
+    if index is not None:
+        idx_even, idx_odd = index[0::2], index[1::2]
+        if isinstance(index, torch.Tensor):
+            if not torch.all(idx_even == idx_odd).item():
+                raise ValueError("DPO loss expects each adjacent chosen/rejected pair to share the same prompt uid.")
+        elif not np.all(np.asarray(idx_even) == np.asarray(idx_odd)):
+            raise ValueError("DPO loss expects each adjacent chosen/rejected pair to share the same prompt uid.")
 
     chosen_scores = scores[0::2]
     rejected_scores = scores[1::2]
