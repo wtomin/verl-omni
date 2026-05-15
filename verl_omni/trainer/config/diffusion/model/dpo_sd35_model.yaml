@@ -28,8 +28,9 @@ use_shm: False
 # Whether to trust remote code.
 trust_remote_code: False
 
-# custom chat template for the model
-custom_chat_template: "{% for message in messages %}{{ message['content'] }}{% endfor %}"
+# Concatenate only user turns. Parquet rows often include a synthetic system message
+# (e.g. from prepare_online_dpo.py); SD3.5 text encoding should use the user caption only.
+custom_chat_template: "{% for message in messages %}{% if message['role'] == 'user' %}{{ message['content'] }}{% endif %}{% endfor %}"
 
 # Import SD3 DPO adapter registrations for training.
 external_lib: verl_omni.pipelines.sd3_dpo
