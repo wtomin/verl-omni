@@ -116,6 +116,7 @@ class StableDiffusion3DPOPipeline(StableDiffusion3Pipeline):
         if prompt == "":
             logger.warning("Prompt is empty. Please check the input prompts.")
         sampling_params = req.sampling_params
+        self._guidance_scale = req.sampling_params.guidance_scale
         height = sampling_params.height or self.default_sample_size * self.vae_scale_factor
         width = sampling_params.width or self.default_sample_size * self.vae_scale_factor
         sigmas = sampling_params.sigmas or sigmas

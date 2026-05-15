@@ -80,10 +80,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--height", type=int, default=256)
     parser.add_argument("--width", type=int, default=256)
-    parser.add_argument("--num-inference-steps", type=int, default=2)
+    parser.add_argument("--num-inference-steps", type=int, default=50)
     parser.add_argument("--max-sequence-length", type=int, default=256)
     parser.add_argument("--guidance-scale", type=float, default=4.0)
-    parser.add_argument("--true-cfg-scale", type=float, default=1.0)
     parser.add_argument("--seed", type=int, default=1234)
     parser.add_argument("--dtype", choices=("bfloat16", "float16", "float32"), default="bfloat16")
     parser.add_argument("--dpo-beta", type=float, default=2000.0)
@@ -349,7 +348,6 @@ def run_training_and_dpo_checks(args: argparse.Namespace, paired_samples: list[R
             max_sequence_length=args.max_sequence_length,
             num_inference_steps=args.num_inference_steps,
             guidance_scale=args.guidance_scale,
-            true_cfg_scale=args.true_cfg_scale,
         ),
     )
 
