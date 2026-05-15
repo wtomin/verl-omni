@@ -886,15 +886,23 @@ class DiffusersDPOFSDPEngine(DiffusersFSDPEngine):
         if latents is None:
             raise KeyError("Diffusion DPO training requires `image_latents` in the micro batch.")
 
-        noise = torch.randn_like(latents)
-        timestep_indices = torch.randint(
-            0,
-            len(self.scheduler.timesteps),
-            (latents.shape[0],),
-            device=latents.device,
-        )
-        timesteps = self.scheduler.timesteps.to(device=latents.device)[timestep_indices]
+        noise = micro_batch.get("dpo_noise", None)
+        timesteps = micro_batch.get("dpo_timesteps", None)
+        if (noise is None) != (timesteps is None):
+            raise KeyError("Diffusion DPO requires `dpo_noise` and `dpo_timesteps` to be materialized together.")
 
+        if noise is None:
+            noise = torch.randn_like(latents)
+            timestep_indices = torch.randint(
+                0,
+                len(self.scheduler.timesteps),
+                (latents.shape[0],),
+                device=latents.device,
+            )
+            timesteps = self.scheduler.timesteps.to(device=latents.device)[timestep_indices]
+        else:
+            noise = noise.to(device=latents.device, dtype=latents.dtype)
+            timesteps = timesteps.to(device=latents.device)
 
         if hasattr(self.scheduler, "scale_noise"):
             noisy_latents = self.scheduler.scale_noise(latents, timesteps, noise)
@@ -915,6 +923,12 @@ class DiffusersDPOFSDPEngine(DiffusersFSDPEngine):
 
     def prepare_model_inputs(self, micro_batch: TensorDict, step: int):
         del step
+
+        if micro_batch.get("dpo_noise", None) is None or micro_batch.get("dpo_timesteps", None) is None:
+            raise KeyError(
+                "Diffusion DPO forward requires pre-materialized `dpo_noise` and `dpo_timesteps`; "
+                "call `materialize_dpo_flow_batch` before actor/reference forward."
+            )
 
         noisy_latents, noise, timesteps = self._prepare_dpo_noisy_latents(micro_batch)
         prompt_embeds = micro_batch["prompt_embeds"]
