@@ -16,6 +16,9 @@ algorithm: dpo
 # Pipeline architecture name from model_index.json
 architecture: StableDiffusion3Pipeline
 
+# Engine model type for diffusion DPO training.
+model_type: diffusion_dpo_model
+
 # Path to the tokenizer. Null means infer it from the model path.
 tokenizer_path: null
 

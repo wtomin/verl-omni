@@ -619,20 +619,14 @@ class DiffusersFSDPEngine(BaseEngine):
             mask = torch.nn.functional.pad(mask, (0, pad_len))
         return embeds, mask
 
-    def prepare_model_inputs(self, micro_batch: TensorDict, step: int):
-        """
-        Extract and pre-process universal tensors, then delegate architecture-specific
-        input construction to the registered DiffusionModelBase subclass.
-
-        Handles common tensor extraction and nested-embed unpadding here.
-        Architecture-specific input dict construction is delegated to the model registry.
-        """
-        latents = micro_batch["all_latents"]
-        timesteps = micro_batch["all_timesteps"]
-        prompt_embeds = micro_batch["prompt_embeds"]
-        prompt_embeds_mask = micro_batch["prompt_embeds_mask"]
-        negative_prompt_embeds = micro_batch["negative_prompt_embeds"]
-        negative_prompt_embeds_mask = micro_batch["negative_prompt_embeds_mask"]
+    def _prepare_prompt_embeds(
+        self,
+        prompt_embeds: torch.Tensor,
+        prompt_embeds_mask: torch.Tensor | None,
+        negative_prompt_embeds: torch.Tensor | None,
+        negative_prompt_embeds_mask: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
+        """Apply common nested-tensor and sequence-parallel padding to prompt embeds."""
         sp_size = self.ulysses_sequence_parallel_size if self.use_ulysses_sp else 1
 
         if prompt_embeds.is_nested:
@@ -650,6 +644,31 @@ class DiffusersFSDPEngine(BaseEngine):
             negative_prompt_embeds, negative_prompt_embeds_mask = self._pad_embeds_for_sp(
                 negative_prompt_embeds, negative_prompt_embeds_mask, sp_size
             )
+
+        return prompt_embeds, prompt_embeds_mask, negative_prompt_embeds, negative_prompt_embeds_mask
+
+    def prepare_model_inputs(self, micro_batch: TensorDict, step: int):
+        """
+        Extract and pre-process universal tensors, then delegate architecture-specific
+        input construction to the registered DiffusionModelBase subclass.
+
+        Handles common tensor extraction and nested-embed unpadding here.
+        Architecture-specific input dict construction is delegated to the model registry.
+        """
+        latents = micro_batch["all_latents"]
+        timesteps = micro_batch["all_timesteps"]
+        prompt_embeds = micro_batch["prompt_embeds"]
+        prompt_embeds_mask = micro_batch["prompt_embeds_mask"]
+        negative_prompt_embeds = micro_batch["negative_prompt_embeds"]
+        negative_prompt_embeds_mask = micro_batch["negative_prompt_embeds_mask"]
+        prompt_embeds, prompt_embeds_mask, negative_prompt_embeds, negative_prompt_embeds_mask = (
+            self._prepare_prompt_embeds(
+                prompt_embeds=prompt_embeds,
+                prompt_embeds_mask=prompt_embeds_mask,
+                negative_prompt_embeds=negative_prompt_embeds,
+                negative_prompt_embeds_mask=negative_prompt_embeds_mask,
+            )
+        )
 
         return prepare_model_inputs(
             module=self.module,
@@ -897,6 +916,109 @@ class DiffusersFSDPEngine(BaseEngine):
             yield
         finally:
             self.module.enable_adapters()
+
+
+@EngineRegistry.register(model_type="diffusion_dpo_model", backend=["fsdp", "fsdp2"], device=["cuda"])
+class DiffusersDPOFSDPEngine(DiffusersFSDPEngine):
+    """Diffusers FSDP engine variant for diffusion DPO."""
+
+    def prepare_model_inputs(self, micro_batch: TensorDict, step: int):
+        del step
+
+        latents = micro_batch.get("image_latents", None)
+        if latents is None:
+            raise KeyError("Diffusion DPO training requires `image_latents` in the micro batch.")
+
+        noise = torch.randn_like(latents)
+        timestep_indices = torch.randint(
+            0,
+            len(self.scheduler.timesteps),
+            (latents.shape[0],),
+            device=latents.device,
+        )
+        timesteps = self.scheduler.timesteps.to(device=latents.device)[timestep_indices]
+        sigmas = self.scheduler.sigmas.to(device=latents.device, dtype=latents.dtype)[timestep_indices]
+        sigmas = sigmas.view(-1, *([1] * (latents.ndim - 1)))
+
+        noisy_latents = (1.0 - sigmas) * latents + sigmas * noise
+        target = noise - latents
+
+        prompt_embeds = micro_batch["prompt_embeds"]
+        prompt_embeds_mask = micro_batch.get("prompt_embeds_mask", None)
+        negative_prompt_embeds = micro_batch.get("negative_prompt_embeds", None)
+        negative_prompt_embeds_mask = micro_batch.get("negative_prompt_embeds_mask", None)
+        prompt_embeds, prompt_embeds_mask, negative_prompt_embeds, negative_prompt_embeds_mask = (
+            self._prepare_prompt_embeds(
+                prompt_embeds=prompt_embeds,
+                prompt_embeds_mask=prompt_embeds_mask,
+                negative_prompt_embeds=negative_prompt_embeds,
+                negative_prompt_embeds_mask=negative_prompt_embeds_mask,
+            )
+        )
+
+        model_inputs, _ = prepare_model_inputs(
+            module=self.module,
+            model_config=self.model_config,
+            latents=noisy_latents,
+            timesteps=timesteps,
+            prompt_embeds=prompt_embeds,
+            prompt_embeds_mask=prompt_embeds_mask,
+            negative_prompt_embeds=negative_prompt_embeds,
+            negative_prompt_embeds_mask=negative_prompt_embeds_mask,
+            micro_batch=micro_batch,
+            step=0,
+        )
+        return model_inputs, {"target": target, "timesteps": timesteps}
+
+    def prepare_model_outputs(self, output, micro_batch: TensorDict):
+        del micro_batch
+
+        raw_output, dpo_context = output
+        if isinstance(raw_output, (tuple, list)):
+            model_pred = raw_output[0]
+        elif hasattr(raw_output, "sample"):
+            model_pred = raw_output.sample
+        else:
+            model_pred = raw_output
+
+        target = dpo_context["target"]
+        mse = torch.nn.functional.mse_loss(model_pred.float(), target.float(), reduction="none")
+        reduce_dims = tuple(range(1, mse.ndim))
+        return {
+            "mse": mse.mean(dim=reduce_dims),
+            "timesteps": dpo_context["timesteps"],
+        }
+
+    def forward_batch(self, micro_batch: TensorDict, loss_function, forward_only):
+        model_inputs, dpo_context = self.prepare_model_inputs(micro_batch=micro_batch, step=0)
+        raw_output = self.module(**model_inputs)
+        model_output = self.prepare_model_outputs(output=(raw_output, dpo_context), micro_batch=micro_batch)
+
+        if loss_function is not None:
+            data = tu.get_tensordict({"sample_level_scores": micro_batch["sample_level_scores"]})
+            uid = tu.get_non_tensor_data(micro_batch, "uid", default=None)
+            tu.assign_non_tensor(
+                data,
+                gradient_accumulation_steps=tu.get_non_tensor_data(
+                    micro_batch, "gradient_accumulation_steps", default=None
+                ),
+                sp_size=tu.get_non_tensor_data(micro_batch, "sp_size", default=None),
+            )
+            if uid is not None:
+                tu.assign_non_tensor(data, uid=uid)
+            loss, metrics = loss_function(model_output=model_output, data=data, dp_group=self.get_data_parallel_group())
+        else:
+            assert forward_only, "forward_only must be True when loss_function is None"
+            loss = torch.tensor(1.0, device=device_name)
+            metrics = {}
+
+        output = {
+            "model_output": model_output,
+            "loss": loss.detach().item(),
+            "metrics": metrics,
+        }
+
+        return loss, output
 
 
 class EngineEvalModeCtx(BaseEngineCtx):
