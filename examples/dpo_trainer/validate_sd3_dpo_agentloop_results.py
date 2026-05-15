@@ -538,10 +538,13 @@ def run_training_and_dpo_checks(args: argparse.Namespace, paired_samples: list[R
             micro_batch=TensorDict(micro_batch_data, batch_size=[len(paired_samples)]),
         )
 
-    if not torch.isfinite(model_output["mse"]).all():
-        raise AssertionError("training adapter produced non-finite MSE")
-    if model_output["mse"].shape != (len(paired_samples),):
-        raise AssertionError(f"unexpected mse shape: {tuple(model_output['mse'].shape)}")
+    if not torch.isfinite(model_output["noise_pred"]).all():
+        raise AssertionError("training adapter produced non-finite noise predictions")
+    if model_output["noise_pred"].shape != model_output["noise"].shape:
+        raise AssertionError(
+            f"unexpected noise prediction shape: {tuple(model_output['noise_pred'].shape)} "
+            f"vs noise {tuple(model_output['noise'].shape)}"
+        )
 
     actor_config = DiffusionActorConfig(
         strategy="fsdp",
@@ -552,7 +555,9 @@ def run_training_and_dpo_checks(args: argparse.Namespace, paired_samples: list[R
     scores = torch.tensor([sample.score for sample in paired_samples], device=device, dtype=torch.float32).unsqueeze(-1)
     uids = np.array([sample.uid for sample in paired_samples], dtype=object)
     dpo_loss, dpo_metrics = compute_diffusion_loss_dpo(
-        policy_mse=model_output["mse"],
+        noise=model_output["noise"],
+        model_noise_pred=model_output["noise_pred"],
+        ref_noise_pred=model_output["noise_pred"].detach(),
         sample_level_scores=scores,
         config=actor_config,
         index=uids,
@@ -560,7 +565,10 @@ def run_training_and_dpo_checks(args: argparse.Namespace, paired_samples: list[R
     if not torch.isfinite(dpo_loss):
         raise AssertionError("DPO loss is not finite")
 
-    print(f"[training] mse_shape={tuple(model_output['mse'].shape)} timesteps={model_output['timesteps'].tolist()}")
+    print(
+        f"[training] noise_pred_shape={tuple(model_output['noise_pred'].shape)} "
+        f"timesteps={model_output['timesteps'].tolist()}"
+    )
     print(f"[dpo] loss={dpo_loss.detach().item():.6f} metrics={dpo_metrics}")
 
 
