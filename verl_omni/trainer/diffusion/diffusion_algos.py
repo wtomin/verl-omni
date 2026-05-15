@@ -16,7 +16,8 @@
 from collections import defaultdict
 from enum import Enum
 from typing import Any, Callable, Optional
-
+import logging
+logger = logging.getLogger(__name__)
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -396,7 +397,7 @@ def compute_diffusion_loss_dpo(
     """Compute DPO loss from adjacent ``chosen, rejected`` sample pairs."""
     assert config is not None
     assert isinstance(config, DiffusionActorConfig)
-
+    logger.warning("DPO uid=%s type=%s", index, type(index))
     scores = sample_level_scores.squeeze(-1) if sample_level_scores.ndim > 1 else sample_level_scores
     if scores.shape[0] < 2 or scores.shape[0] % 2 != 0:
         raise ValueError("DPO loss expects an even batch of adjacent chosen/rejected pairs.")
