@@ -76,10 +76,9 @@ class StableDiffusion3DPO(DiffusionModelBase):
         latents: (B, C, H, W)  # already-noised latents
         timesteps: (B,)
         """
-        if prompt_embeds_mask is not None:
-            raise ValueError("prompt_embeds_mask is not supported for DPO training.")
-        if negative_prompt_embeds_mask is not None:
-            raise ValueError("negative_prompt_embeds_mask is not supported for DPO training.")
+        if prompt_embeds_mask is None:
+            raise ValueError("prompt_embeds_mask is required for DPO training.")
+        assert isinstance(prompt_embeds_mask, torch.Tensor)
 
         pooled_prompt_embeds = micro_batch.get("pooled_prompt_embeds", None)
         negative_pooled_prompt_embeds = micro_batch.get("negative_pooled_prompt_embeds", None)
@@ -93,6 +92,7 @@ class StableDiffusion3DPO(DiffusionModelBase):
             latents=latents,
             timesteps=timesteps,
             prompt_embeds=prompt_embeds,
+            prompt_embeds_mask=prompt_embeds_mask,
             pooled_prompt_embeds=pooled_prompt_embeds,
         )
         negative_model_inputs = None
@@ -101,6 +101,7 @@ class StableDiffusion3DPO(DiffusionModelBase):
                 latents=latents,
                 timesteps=timesteps,
                 prompt_embeds=negative_prompt_embeds,
+                prompt_embeds_mask=negative_prompt_embeds_mask,
                 pooled_prompt_embeds=negative_pooled_prompt_embeds,
             )
 
@@ -117,6 +118,7 @@ class StableDiffusion3DPO(DiffusionModelBase):
         latents: torch.Tensor,
         timesteps: torch.Tensor,
         prompt_embeds: torch.Tensor,
+        prompt_embeds_mask: torch.Tensor,
         pooled_prompt_embeds: torch.Tensor,
     ) -> dict[str, Any]:
         """Create the SD3Transformer2DModel keyword arguments."""
@@ -125,6 +127,9 @@ class StableDiffusion3DPO(DiffusionModelBase):
             "encoder_hidden_states": prompt_embeds,
             "pooled_projections": pooled_prompt_embeds,
             "timestep": timesteps,
+            "joint_attention_kwargs": {
+                "attention_mask": prompt_embeds_mask,
+            },
         }
 
     @classmethod
