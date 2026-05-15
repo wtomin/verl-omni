@@ -37,6 +37,36 @@ DiffusionLossFn = Callable[
 DIFFUSION_LOSS_REGISTRY: dict[str, DiffusionLossFn] = {}
 
 
+def _dpo_adjacent_pairs_share_prompt_uid(index: Any, n: int) -> bool:
+    """Return True iff each adjacent (chosen, rejected) pair shares the same prompt uid.
+
+    Avoids slicing or ``np.asarray`` on TensorDict / TensorClass handles (batch_dims==0), which
+    cannot be indexed like a plain tensor.
+    """
+    if isinstance(index, torch.Tensor):
+        flat = index.reshape(-1)[:n]
+        return bool(torch.all(flat[0::2] == flat[1::2]).item())
+    if isinstance(index, np.ndarray):
+        flat = np.asarray(index).reshape(-1)[:n]
+        return bool(np.all(flat[0::2] == flat[1::2]))
+    if isinstance(index, (list, tuple)):
+        flat = np.asarray(index, dtype=object).reshape(-1)[:n]
+        return bool(np.all(flat[0::2] == flat[1::2]))
+    tolist = getattr(index, "tolist", None)
+    if callable(tolist):
+        try:
+            raw = tolist()
+        except (RuntimeError, TypeError, ValueError):
+            raw = None
+        if raw is not None and not isinstance(raw, (str, bytes, bytearray)):
+            flat = np.asarray(raw, dtype=object).reshape(-1)[:n]
+            return bool(np.all(flat[0::2] == flat[1::2]))
+    raise TypeError(
+        f"DPO `index` (prompt uid) has unsupported type {type(index)}. "
+        "Use a torch.Tensor, numpy.ndarray, list, or tuple (or pass uids via non_tensor batch)."
+    )
+
+
 def register_diffusion_loss(name: str) -> Callable[[DiffusionLossFn], DiffusionLossFn]:
     """Register a diffusion loss function with the given name.
 
@@ -371,11 +401,8 @@ def compute_diffusion_loss_dpo(
     if scores.shape[0] < 2 or scores.shape[0] % 2 != 0:
         raise ValueError("DPO loss expects an even batch of adjacent chosen/rejected pairs.")
     if index is not None:
-        idx_even, idx_odd = index[0::2], index[1::2]
-        if isinstance(index, torch.Tensor):
-            if not torch.all(idx_even == idx_odd).item():
-                raise ValueError("DPO loss expects each adjacent chosen/rejected pair to share the same prompt uid.")
-        elif not np.all(np.asarray(idx_even) == np.asarray(idx_odd)):
+        n = int(scores.shape[0])
+        if not _dpo_adjacent_pairs_share_prompt_uid(index, n):
             raise ValueError("DPO loss expects each adjacent chosen/rejected pair to share the same prompt uid.")
 
     chosen_scores = scores[0::2]

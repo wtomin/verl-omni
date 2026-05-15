@@ -39,7 +39,7 @@ def diffusion_loss(config: DiffusionActorConfig, model_output, data: TensorDict,
             ref_noise_pred=ref_noise_pred,
             sample_level_scores=data["sample_level_scores"],
             config=config,
-            index=tu.get(data, "uid", None),
+            index=tu.get_non_tensor_data(data, "uid", default=None),
         )
         pg_loss, pg_metrics = policy_loss_fn(**policy_loss_kwargs)
         pg_metrics = Metric.from_dict(pg_metrics, aggregation=AggregationType.MEAN)

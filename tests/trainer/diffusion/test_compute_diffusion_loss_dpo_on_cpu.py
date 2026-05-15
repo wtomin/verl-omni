@@ -67,6 +67,34 @@ def test_compute_diffusion_loss_dpo_matches_manual_reference() -> None:
     )
 
 
+def test_compute_diffusion_loss_dpo_uid_index_uses_tolist_when_getitem_unusable() -> None:
+    """Guards against TensorClass/TensorDict-style objects that forbid ``index[0::2]``."""
+
+    class _UidHandle:
+        def __init__(self, uids: list[str]) -> None:
+            self._uids = uids
+
+        def __getitem__(self, _key: object) -> None:
+            raise RuntimeError("simulates batch_dims==0 tensordict indexing failure")
+
+        def tolist(self) -> list[str]:
+            return list(self._uids)
+
+    cfg = _dpo_actor_config(dpo_beta=1.0)
+    noise = torch.zeros((4, 2), dtype=torch.float32)
+
+    loss, _metrics = compute_diffusion_loss_dpo(
+        noise=noise,
+        model_noise_pred=noise.clone(),
+        ref_noise_pred=noise.clone(),
+        sample_level_scores=torch.tensor([1.0, 0.0, 1.0, 0.0], dtype=torch.float32),
+        config=cfg,
+        index=_UidHandle(["p0", "p0", "p1", "p1"]),
+    )
+
+    assert loss.shape == ()
+
+
 def test_compute_diffusion_loss_dpo_accepts_torch_index() -> None:
     cfg = _dpo_actor_config(dpo_beta=1.0)
     noise = torch.randn((2, 4, 4), dtype=torch.float32)
@@ -85,6 +113,25 @@ def test_compute_diffusion_loss_dpo_accepts_torch_index() -> None:
     assert loss.shape == ()
     assert "actor/dpo_loss" in metrics
     assert "actor/dpo_accuracy" in metrics
+
+
+def test_compute_diffusion_loss_dpo_accepts_plain_list_index() -> None:
+    cfg = _dpo_actor_config(dpo_beta=1.0)
+    noise = torch.randn((4, 4, 4), dtype=torch.float32)
+    model_noise_pred = noise + 0.01 * torch.randn_like(noise)
+    ref_noise_pred = noise + 0.02 * torch.randn_like(noise)
+
+    loss, metrics = compute_diffusion_loss_dpo(
+        noise=noise,
+        model_noise_pred=model_noise_pred,
+        ref_noise_pred=ref_noise_pred,
+        sample_level_scores=torch.tensor([0.9, 0.1, 0.8, 0.0], dtype=torch.float32),
+        config=cfg,
+        index=["u0", "u0", "u1", "u1"],
+    )
+
+    assert loss.shape == ()
+    assert "actor/dpo_loss" in metrics
 
 
 @pytest.mark.parametrize(
