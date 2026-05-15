@@ -200,7 +200,11 @@ class RayFlowGRPOTrainer:
 
         self.role_worker_mapping = role_worker_mapping
         self.resource_pool_manager = resource_pool_manager
-        self.use_reference_policy = need_reference_policy(self.config)
+        # DPO needs reference noise predictions even when KL reward / KL loss are disabled; verl's
+        # need_reference_policy() only covers those KL paths.
+        self.use_reference_policy = need_reference_policy(self.config) or (
+            self.config.algorithm.adv_estimator == DiffusionAdvantageEstimator.DPO.value
+        )
 
         self.use_rm = need_reward_model(self.config)
         self.ray_worker_group_cls = ray_worker_group_cls
