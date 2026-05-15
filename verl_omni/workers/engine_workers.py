@@ -695,6 +695,8 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         if output is None:
             return None
         noise_pred = tu.get(output, "noise_pred")
+        if noise_pred.ndim >= 2 and noise_pred.shape[1] == 1:
+            noise_pred = noise_pred[:, 0]
         return tu.get_tensordict({"ref_noise_pred": noise_pred.float()}).cpu()
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))
@@ -705,6 +707,8 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         if output is None:
             return None
         noise_pred = tu.get(output, "noise_pred")
+        if noise_pred.ndim >= 2 and noise_pred.shape[1] == 1:
+            noise_pred = noise_pred[:, 0]
         return tu.get_tensordict({"ref_noise_pred": noise_pred.float()}).cpu()
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))

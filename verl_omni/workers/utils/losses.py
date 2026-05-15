@@ -30,12 +30,16 @@ def diffusion_loss(config: DiffusionActorConfig, model_output, data: TensorDict,
 
     if loss_mode == "dpo":
         policy_loss_fn = get_diffusion_loss_fn(loss_mode)
+        ref_noise_pred = data.get("ref_noise_pred", None)
+        if ref_noise_pred is None:
+            raise KeyError("DPO loss requires `ref_noise_pred` from the reference diffusion model.")
         policy_loss_kwargs = dict(
-            policy_mse=model_output["mse"],
+            noise=model_output["noise"],
+            model_noise_pred=model_output["noise_pred"],
+            ref_noise_pred=ref_noise_pred,
             sample_level_scores=data["sample_level_scores"],
             config=config,
             index=tu.get_non_tensor_data(data, "uid", default=None),
-            ref_mse=data.get("ref_mse", None),
         )
         pg_loss, pg_metrics = policy_loss_fn(**policy_loss_kwargs)
         pg_metrics = Metric.from_dict(pg_metrics, aggregation=AggregationType.MEAN)

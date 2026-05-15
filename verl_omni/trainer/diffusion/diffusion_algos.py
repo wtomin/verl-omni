@@ -355,12 +355,13 @@ def compute_diffusion_loss_grpo_guard(
 
 @register_diffusion_loss("dpo")
 def compute_diffusion_loss_dpo(
-    policy_mse: torch.Tensor,
+    noise: torch.Tensor,
+    model_noise_pred: torch.Tensor,
+    ref_noise_pred: torch.Tensor,
     sample_level_scores: torch.Tensor,
     config: Optional[DictConfig | DiffusionActorConfig] = None,
     *,
     index: Optional[np.ndarray] = None,
-    ref_mse: Optional[torch.Tensor] = None,
 ) -> tuple[torch.Tensor, dict[str, Any]]:
     """Compute DPO loss from adjacent ``chosen, rejected`` sample pairs."""
     assert config is not None
@@ -377,22 +378,23 @@ def compute_diffusion_loss_dpo(
     if torch.any(chosen_scores < rejected_scores).item():
         raise ValueError("DPO loss expects each chosen sample reward to be >= its rejected pair reward.")
 
-    policy_chosen_mse = policy_mse[0::2]
-    policy_rejected_mse = policy_mse[1::2]
-    policy_logratio = policy_rejected_mse - policy_chosen_mse
-    if ref_mse is not None:
-        ref_logratio = ref_mse[1::2] - ref_mse[0::2]
-    else:
-        ref_logratio = torch.zeros_like(policy_logratio)
-
     beta = config.diffusion_loss.dpo_beta
-    logits = beta * (policy_logratio - ref_logratio)
-    dpo_loss = -F.logsigmoid(logits).mean()
+    model_err = (model_noise_pred.float() - noise.float()).flatten(1).norm(dim=1).pow(2)
+    ref_err = (ref_noise_pred.float() - noise.float()).flatten(1).norm(dim=1).pow(2)
+
+    model_w_err = model_err[0::2]
+    model_l_err = model_err[1::2]
+    ref_w_err = ref_err[0::2]
+    ref_l_err = ref_err[1::2]
+    w_diff = model_w_err - ref_w_err
+    l_diff = model_l_err - ref_l_err
+    inside_term = -1 * beta * (w_diff - l_diff)
+    dpo_loss = -F.logsigmoid(inside_term).mean()
 
     with torch.no_grad():
         metrics = {
             "actor/dpo_loss": dpo_loss.detach().item(),
-            "actor/dpo_accuracy": (policy_logratio > ref_logratio).float().mean().detach().item(),
+            "actor/dpo_accuracy": (inside_term > 0).float().mean().detach().item(),
         }
     return dpo_loss, metrics
 

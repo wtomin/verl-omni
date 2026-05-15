@@ -69,7 +69,7 @@ class StableDiffusion3DPO(DiffusionModelBase):
         negative_prompt_embeds_mask: torch.Tensor,
         micro_batch: TensorDict,
         step: int,
-    ) -> tuple[dict[str, Any], None]:
+    ) -> tuple[dict[str, Any], Optional[dict[str, Any]]]:
         """Build SD3 transformer inputs.
 
         For DPO-specific training, callers should normally pass already-noised
@@ -81,8 +81,8 @@ class StableDiffusion3DPO(DiffusionModelBase):
 
         pooled_prompt_embeds = micro_batch.get("pooled_prompt_embeds", None)
         negative_pooled_prompt_embeds = micro_batch.get("negative_pooled_prompt_embeds", None)
-        do_true_cfg = (
-            model_config.pipeline.true_cfg_scale > 1.0
+        do_cfg = (
+            model_config.pipeline.guidance_scale > 1.0
             and negative_prompt_embeds is not None
             and negative_pooled_prompt_embeds is not None
         )
@@ -92,11 +92,15 @@ class StableDiffusion3DPO(DiffusionModelBase):
             timesteps=timesteps,
             prompt_embeds=prompt_embeds,
             pooled_prompt_embeds=pooled_prompt_embeds,
-            negative_prompt_embeds=negative_prompt_embeds if do_true_cfg else None,
-            negative_pooled_prompt_embeds=negative_pooled_prompt_embeds if do_true_cfg else None,
-            do_true_cfg=do_true_cfg,
-            guidance_scale=model_config.pipeline.guidance_scale,
         )
+        negative_model_inputs = None
+        if do_cfg:
+            negative_model_inputs = cls.build_transformer_inputs(
+                latents=latents,
+                timesteps=timesteps,
+                prompt_embeds=negative_prompt_embeds,
+                pooled_prompt_embeds=negative_pooled_prompt_embeds,
+            )
 
         # Keep a lightweight sanity check near the adapter boundary; SD3 uses
         # pooled prompt projections in addition to sequence prompt embeddings.
@@ -104,7 +108,7 @@ class StableDiffusion3DPO(DiffusionModelBase):
             raise KeyError("SD3 DPO training requires `pooled_prompt_embeds` in the micro batch.")
 
         del module
-        return model_inputs, None
+        return model_inputs, negative_model_inputs
 
     @staticmethod
     def build_transformer_inputs(
@@ -113,74 +117,35 @@ class StableDiffusion3DPO(DiffusionModelBase):
         timesteps: torch.Tensor,
         prompt_embeds: torch.Tensor,
         pooled_prompt_embeds: torch.Tensor,
-        negative_prompt_embeds: Optional[torch.Tensor] = None,
-        negative_pooled_prompt_embeds: Optional[torch.Tensor] = None,
-        do_true_cfg: bool = False,
-        guidance_scale: Optional[float] = None,
     ) -> dict[str, Any]:
-        """Create the SD3 transformer keyword arguments."""
+        """Create the SD3Transformer2DModel keyword arguments."""
         return {
-            "latents": latents,
-            "timesteps": timesteps,
-            "prompt_embeds": prompt_embeds,
-            "pooled_prompt_embeds": pooled_prompt_embeds,
-            "negative_prompt_embeds": negative_prompt_embeds,
-            "negative_pooled_prompt_embeds": negative_pooled_prompt_embeds,
-            "do_true_cfg": do_true_cfg,
-            "guidance_scale": guidance_scale,
+            "hidden_states": latents,
+            "encoder_hidden_states": prompt_embeds,
+            "pooled_projections": pooled_prompt_embeds,
+            "timestep": timesteps,
         }
 
-    @staticmethod
-    def forward_mse(
-        module: ModelMixin,
-        model_inputs: dict[str, Any],
-        target: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Run SD3 transformer and return per-sample flow-matching MSE."""
-        model_pred = module(**model_inputs)[0]
-        mse = F.mse_loss(model_pred.float(), target.float(), reduction="none")
-        reduce_dims = tuple(range(1, mse.ndim))
-        return mse.mean(dim=reduce_dims), model_pred
-
     @classmethod
-    def forward_batch(
+    def forward_and_sample_previous_step(
         cls,
         module: ModelMixin,
         scheduler: SchedulerMixin,
         model_config: DiffusionModelConfig,
-        micro_batch: TensorDict,
-    ) -> dict[str, torch.Tensor]:
-        """Run one SD3 flow-matching training batch for DPO."""
-        latents = micro_batch.get("image_latents", None)
+        model_inputs: dict[str, torch.Tensor],
+        negative_model_inputs: Optional[dict[str, torch.Tensor]],
+        scheduler_inputs: Optional[TensorDict | dict[str, torch.Tensor]],
+        step: int,
+    ) -> torch.Tensor:
+        """Run a single SD3 DPO transformer forward and return predicted noise."""
+        del scheduler, scheduler_inputs, step
 
-        if latents is None:
-            raise KeyError("SD3 DPO training requires `image_latents` in the micro batch.")
+        noise_pred = module(**model_inputs)[0]
+        guidance_scale = model_config.pipeline.guidance_scale
+        if guidance_scale > 1.0:
+            if negative_model_inputs is None:
+                raise ValueError("SD3 DPO CFG requires negative prompt inputs when guidance_scale > 1.")
+            negative_noise_pred = module(**negative_model_inputs)[0]
+            noise_pred = negative_noise_pred + guidance_scale * (noise_pred - negative_noise_pred)
+        return noise_pred
 
-        noise = torch.randn_like(latents)
-        timestep_indices = torch.randint(
-            0,
-            len(scheduler.timesteps),
-            (latents.shape[0],),
-            device=latents.device,
-        )
-        timesteps = scheduler.timesteps.to(device=latents.device)[timestep_indices]
-        sigmas = scheduler.sigmas.to(device=latents.device, dtype=latents.dtype)[timestep_indices]
-        sigmas = sigmas.view(-1, *([1] * (latents.ndim - 1)))
-
-        noisy_latents = (1.0 - sigmas) * latents + sigmas * noise
-        target = noise - latents
-
-        model_inputs, _ = cls.prepare_model_inputs(
-            module=module,
-            model_config=model_config,
-            latents=noisy_latents,
-            timesteps=timesteps,
-            prompt_embeds=micro_batch["prompt_embeds"],
-            prompt_embeds_mask=micro_batch.get("prompt_embeds_mask", None),
-            negative_prompt_embeds=micro_batch.get("negative_prompt_embeds", None),
-            negative_prompt_embeds_mask=micro_batch.get("negative_prompt_embeds_mask", None),
-            micro_batch=micro_batch,
-            step=0,
-        )
-        mse, _ = cls.forward_mse(module=module, model_inputs=model_inputs, target=target)
-        return {"mse": mse, "timesteps": timesteps}

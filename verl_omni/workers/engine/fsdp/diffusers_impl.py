@@ -881,9 +881,7 @@ class DiffusersFSDPEngine(BaseEngine):
 class DiffusersDPOFSDPEngine(DiffusersFSDPEngine):
     """Diffusers FSDP engine variant for diffusion DPO."""
 
-    def prepare_model_inputs(self, micro_batch: TensorDict, step: int):
-        del step
-
+    def _prepare_dpo_noisy_latents(self, micro_batch: TensorDict) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         latents = micro_batch.get("image_latents", None)
         if latents is None:
             raise KeyError("Diffusion DPO training requires `image_latents` in the micro batch.")
@@ -896,11 +894,29 @@ class DiffusersDPOFSDPEngine(DiffusersFSDPEngine):
             device=latents.device,
         )
         timesteps = self.scheduler.timesteps.to(device=latents.device)[timestep_indices]
-        sigmas = self.scheduler.sigmas.to(device=latents.device, dtype=latents.dtype)[timestep_indices]
-        sigmas = sigmas.view(-1, *([1] * (latents.ndim - 1)))
 
-        noisy_latents = (1.0 - sigmas) * latents + sigmas * noise
-        target = noise - latents
+
+        if hasattr(self.scheduler, "scale_noise"):
+            noisy_latents = self.scheduler.scale_noise(latents, timesteps, noise)
+        else:
+            scheduler_timesteps = self.scheduler.timesteps.to(device=latents.device)
+            timestep_indices = (scheduler_timesteps[None, :] - timesteps[:, None]).abs().argmin(dim=1)
+            sigmas = self.scheduler.sigmas.to(device=latents.device, dtype=latents.dtype)[timestep_indices]
+            sigmas = sigmas.view(-1, *([1] * (latents.ndim - 1)))
+            noisy_latents = (1.0 - sigmas) * latents + sigmas * noise
+
+        return noisy_latents, noise, timesteps
+
+    def materialize_dpo_flow_batch(self, data: TensorDict) -> None:
+        """Sample shared DPO flow tensors before actor/ref forward passes."""
+        _, noise, timesteps = self._prepare_dpo_noisy_latents(data)
+        data["dpo_noise"] = noise
+        data["dpo_timesteps"] = timesteps
+
+    def prepare_model_inputs(self, micro_batch: TensorDict, step: int):
+        del step
+
+        noisy_latents, noise, timesteps = self._prepare_dpo_noisy_latents(micro_batch)
         prompt_embeds = micro_batch["prompt_embeds"]
         prompt_embeds_mask = micro_batch.get("prompt_embeds_mask", None)
         negative_prompt_embeds = micro_batch.get("negative_prompt_embeds", None)
@@ -926,18 +942,16 @@ class DiffusersDPOFSDPEngine(DiffusersFSDPEngine):
             micro_batch=micro_batch,
             step=0,
         )
-        return model_inputs, negative_model_inputs, {"target": target, "timesteps": timesteps}
+        return model_inputs, negative_model_inputs, {"noise": noise, "timesteps": timesteps}
 
     def prepare_model_outputs(self, output, micro_batch: TensorDict):
         del micro_batch
 
         noise_pred, dpo_context = output
 
-        target = dpo_context["target"]
-        mse = torch.nn.functional.mse_loss(noise_pred.float(), target.float(), reduction="none")
-        reduce_dims = tuple(range(1, mse.ndim))
         return {
-            "mse": mse.mean(dim=reduce_dims),
+            "noise_pred": noise_pred,
+            "noise": dpo_context["noise"],
             "timesteps": dpo_context["timesteps"],
         }
 
@@ -966,6 +980,11 @@ class DiffusersDPOFSDPEngine(DiffusersFSDPEngine):
             )
             if uid is not None:
                 tu.assign_non_tensor(data, uid=uid)
+            if micro_batch.get("ref_noise_pred", None) is not None:
+                ref_noise_pred = micro_batch["ref_noise_pred"]
+                if ref_noise_pred.ndim == model_output["noise_pred"].ndim + 1 and ref_noise_pred.shape[1] == 1:
+                    ref_noise_pred = ref_noise_pred[:, 0]
+                data["ref_noise_pred"] = ref_noise_pred
             loss, metrics = loss_function(model_output=model_output, data=data, dp_group=self.get_data_parallel_group())
         else:
             assert forward_only, "forward_only must be True when loss_function is None"
