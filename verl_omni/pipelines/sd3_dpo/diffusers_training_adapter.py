@@ -17,7 +17,6 @@
 from typing import Any, Optional
 
 import torch
-import torch.nn.functional as F
 from diffusers import FlowMatchEulerDiscreteScheduler, ModelMixin, SchedulerMixin
 from tensordict import TensorDict
 from verl.utils.device import get_device_name
@@ -107,8 +106,8 @@ class StableDiffusion3DPO(DiffusionModelBase):
 
         # Keep a lightweight sanity check near the adapter boundary; SD3 uses
         # pooled prompt projections in addition to sequence prompt embeddings.
-        if model_inputs["pooled_prompt_embeds"] is None:
-            raise KeyError("SD3 DPO training requires `pooled_prompt_embeds` in the micro batch.")
+        if model_inputs["pooled_projections"] is None:
+            raise KeyError("SD3 DPO training requires `pooled_projections` in the micro batch.")
 
         return model_inputs, negative_model_inputs
 
@@ -149,4 +148,3 @@ class StableDiffusion3DPO(DiffusionModelBase):
             negative_noise_pred = module(**negative_model_inputs)[0]
             noise_pred = negative_noise_pred + guidance_scale * (noise_pred - negative_noise_pred)
         return noise_pred
-
