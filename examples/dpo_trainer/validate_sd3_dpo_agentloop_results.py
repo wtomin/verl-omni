@@ -24,10 +24,16 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import gc
 import importlib
 import importlib.util
 import inspect
+import os
+import subprocess
+import time
+import urllib.error
+import urllib.request
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -101,6 +107,36 @@ def parse_args() -> argparse.Namespace:
         help="OpenAI-compatible reward router address, e.g. 127.0.0.1:8000. Required for UnifiedReward scoring.",
     )
     parser.add_argument(
+        "--launch-reward-server",
+        action="store_true",
+        help="Launch an OpenAI-compatible vLLM reward server from this script.",
+    )
+    parser.add_argument("--reward-server-host", default="127.0.0.1", help="Host used when launching reward server.")
+    parser.add_argument("--reward-server-port", type=int, default=8000, help="Port used when launching reward server.")
+    parser.add_argument(
+        "--reward-server-tensor-parallel-size",
+        type=int,
+        default=1,
+        help="Tensor parallel size passed to `vllm serve` for the reward model.",
+    )
+    parser.add_argument(
+        "--reward-server-gpu-memory-utilization",
+        type=float,
+        default=None,
+        help="Optional `--gpu-memory-utilization` passed to `vllm serve` for the reward model.",
+    )
+    parser.add_argument(
+        "--reward-server-cuda-visible-devices",
+        default=None,
+        help="Optional CUDA_VISIBLE_DEVICES value for the reward server subprocess.",
+    )
+    parser.add_argument(
+        "--reward-server-startup-timeout",
+        type=float,
+        default=600.0,
+        help="Seconds to wait for the launched reward server to become ready.",
+    )
+    parser.add_argument(
         "--reward-model",
         default=DEFAULT_REWARD_MODEL,
         help="Reward model name/path forwarded to the custom reward function.",
@@ -126,6 +162,65 @@ def parse_args() -> argparse.Namespace:
         help="Skip the training adapter check after rollout and reward validation.",
     )
     return parser.parse_args()
+
+
+@contextlib.contextmanager
+def maybe_launch_reward_server(args: argparse.Namespace):
+    """Optionally launch a local vLLM reward server for OpenAI-compatible reward functions."""
+    if not args.launch_reward_server:
+        yield
+        return
+
+    if args.reward_router_address is not None:
+        raise ValueError("Use either --launch-reward-server or --reward-router-address, not both.")
+
+    args.reward_router_address = f"{args.reward_server_host}:{args.reward_server_port}"
+    command = [
+        "vllm",
+        "serve",
+        args.reward_model,
+        "--host",
+        args.reward_server_host,
+        "--port",
+        str(args.reward_server_port),
+        "--tensor-parallel-size",
+        str(args.reward_server_tensor_parallel_size),
+    ]
+    if args.reward_server_gpu_memory_utilization is not None:
+        command.extend(["--gpu-memory-utilization", str(args.reward_server_gpu_memory_utilization)])
+
+    env = os.environ.copy()
+    if args.reward_server_cuda_visible_devices is not None:
+        env["CUDA_VISIBLE_DEVICES"] = args.reward_server_cuda_visible_devices
+
+    process = subprocess.Popen(command, env=env)
+    try:
+        _wait_for_reward_server(args.reward_router_address, args.reward_server_startup_timeout, process)
+        yield
+    finally:
+        process.terminate()
+        try:
+            process.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+
+
+def _wait_for_reward_server(address: str, timeout: float, process: subprocess.Popen) -> None:
+    url = f"http://{address}/v1/models"
+    deadline = time.monotonic() + timeout
+    last_error: Exception | None = None
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            raise RuntimeError(f"Reward server exited early with code {process.returncode}")
+        try:
+            with urllib.request.urlopen(url, timeout=5) as response:
+                if 200 <= response.status < 300:
+                    return
+        except (urllib.error.URLError, TimeoutError) as exc:
+            last_error = exc
+        time.sleep(2)
+    raise TimeoutError(f"Timed out waiting for reward server at {url}: {last_error}")
 
 
 def torch_dtype(name: str) -> torch.dtype:
@@ -481,6 +576,68 @@ def stack_custom_outputs(samples: list[RolloutSample], key: str, *, device: str,
     return torch.cat(tensors, dim=0)
 
 
+def prepare_dpo_noisy_latents(
+    scheduler,
+    latents: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    noise = torch.randn_like(latents)
+    timestep_indices = torch.randint(
+        0,
+        len(scheduler.timesteps),
+        (latents.shape[0],),
+        device=latents.device,
+    )
+    timesteps = scheduler.timesteps.to(device=latents.device)[timestep_indices]
+
+    if hasattr(scheduler, "scale_noise"):
+        noisy_latents = scheduler.scale_noise(latents, timesteps, noise)
+    else:
+        scheduler_timesteps = scheduler.timesteps.to(device=latents.device)
+        timestep_indices = (scheduler_timesteps[None, :] - timesteps[:, None]).abs().argmin(dim=1)
+        sigmas = scheduler.sigmas.to(device=latents.device, dtype=latents.dtype)[timestep_indices]
+        sigmas = sigmas.view(-1, *([1] * (latents.ndim - 1)))
+        noisy_latents = (1.0 - sigmas) * latents + sigmas * noise
+
+    return noisy_latents, noise, timesteps
+
+
+def run_sd3_dpo_training_forward(
+    *,
+    transformer,
+    scheduler,
+    model_config: SimpleNamespace,
+    micro_batch: TensorDict,
+) -> dict[str, torch.Tensor]:
+    latents = micro_batch["image_latents"]
+    noisy_latents, noise, timesteps = prepare_dpo_noisy_latents(scheduler, latents)
+    model_inputs, negative_model_inputs = StableDiffusion3DPO.prepare_model_inputs(
+        module=transformer,
+        model_config=model_config,
+        latents=noisy_latents,
+        timesteps=timesteps,
+        prompt_embeds=micro_batch["prompt_embeds"],
+        prompt_embeds_mask=micro_batch.get("prompt_embeds_mask", None),
+        negative_prompt_embeds=micro_batch.get("negative_prompt_embeds", None),
+        negative_prompt_embeds_mask=micro_batch.get("negative_prompt_embeds_mask", None),
+        micro_batch=micro_batch,
+        step=0,
+    )
+    noise_pred = StableDiffusion3DPO.forward_and_sample_previous_step(
+        module=transformer,
+        scheduler=scheduler,
+        model_config=model_config,
+        model_inputs=model_inputs,
+        negative_model_inputs=negative_model_inputs,
+        scheduler_inputs=micro_batch,
+        step=0,
+    )
+    return {
+        "noise_pred": noise_pred,
+        "noise": noise,
+        "timesteps": timesteps,
+    }
+
+
 def run_training_and_dpo_checks(args: argparse.Namespace, paired_samples: list[RolloutSample]) -> None:
     from diffusers import FlowMatchEulerDiscreteScheduler, SD3Transformer2DModel
 
@@ -531,8 +688,8 @@ def run_training_and_dpo_checks(args: argparse.Namespace, paired_samples: list[R
         )
 
     with torch.no_grad():
-        model_output = StableDiffusion3DPO.forward_batch(
-            module=transformer,
+        model_output = run_sd3_dpo_training_forward(
+            transformer=transformer,
             scheduler=scheduler,
             model_config=model_config,
             micro_batch=TensorDict(micro_batch_data, batch_size=[len(paired_samples)]),
@@ -579,20 +736,21 @@ def main() -> None:
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA is required for this validation script")
 
-    prompt_cases = load_prompt_cases(args)
-    print(f"[data] loaded {len(prompt_cases)} prompts from {Path(args.data).expanduser()}")
-    samples = asyncio.run(run_rollouts(args, prompt_cases))
-    paired_samples = select_adjacent_dpo_pairs(samples)
+    with maybe_launch_reward_server(args):
+        prompt_cases = load_prompt_cases(args)
+        print(f"[data] loaded {len(prompt_cases)} prompts from {Path(args.data).expanduser()}")
+        samples = asyncio.run(run_rollouts(args, prompt_cases))
+        paired_samples = select_adjacent_dpo_pairs(samples)
 
-    gc.collect()
-    torch.cuda.empty_cache()
+        gc.collect()
+        torch.cuda.empty_cache()
 
-    if args.skip_training_forward:
-        print("[ok] rollout custom_output and reward validation passed; skipped training adapter check")
-        return
+        if args.skip_training_forward:
+            print("[ok] rollout custom_output and reward validation passed; skipped training adapter check")
+            return
 
-    run_training_and_dpo_checks(args, paired_samples)
-    print("[ok] SD3 DPO agent-loop rollout outputs are compatible with GPU training and DPO loss")
+        run_training_and_dpo_checks(args, paired_samples)
+        print("[ok] SD3 DPO agent-loop rollout outputs are compatible with GPU training and DPO loss")
 
 
 if __name__ == "__main__":
