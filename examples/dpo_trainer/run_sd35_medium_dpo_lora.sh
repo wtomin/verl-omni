@@ -21,7 +21,7 @@ ENGINE=vllm_omni
 REWARD_ENGINE=vllm
 
 python3 -m verl_omni.trainer.diffusion.main_dpo \
-    data=prompt_txt_data \
+    data=legacy_data \
     data.train_files=$pickscore_train_path \
     data.val_files=$pickscore_test_path \
     trainer.resume_mode=disable \

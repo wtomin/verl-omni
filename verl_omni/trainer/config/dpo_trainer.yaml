@@ -13,8 +13,8 @@ defaults:
   # actor_rollout_ref.actor: trainer/config/diffusion/actor/dp_diffusion_actor.yaml
   - diffusion/actor@actor_rollout_ref.actor: ${diffusion/model_engine}_actor
 
-  # data: trainer/config/data/prompt_txt_data.yaml (prompt-only parquet rows)
-  - data@data: prompt_txt_data
+  # data: trainer/config/data/legacy_data.yaml (same base schema as diffusion trainer)
+  - data@data: legacy_data
 
   # Reference model config (required for DPO)
   - diffusion/ref@actor_rollout_ref.ref: ${diffusion/model_engine}_ref
