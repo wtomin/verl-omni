@@ -25,9 +25,11 @@ from __future__ import annotations
 import argparse
 import asyncio
 import gc
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from uuid import uuid4
 
 import numpy as np
@@ -58,6 +60,7 @@ class RolloutSample:
     sample_index: int
     score: float
     custom_output: dict
+    image_paths: tuple[Path, ...]
 
 
 def parse_args() -> argparse.Namespace:
@@ -84,6 +87,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=1234)
     parser.add_argument("--dtype", choices=("bfloat16", "float16", "float32"), default="bfloat16")
     parser.add_argument("--dpo-beta", type=float, default=2000.0)
+    parser.add_argument(
+        "--output-dir",
+        default="outputs/sd3_dpo_agentloop_validation",
+        help="Directory used to save generated rollout images.",
+    )
     parser.add_argument(
         "--skip-training-forward",
         action="store_true",
@@ -192,6 +200,60 @@ def score_for_pair_selection(custom_output: dict) -> float:
     return -latents.square().mean().item()
 
 
+def _to_uint8_hwc_array(image: Any) -> np.ndarray:
+    array = image.detach().cpu().float().numpy() if isinstance(image, torch.Tensor) else np.asarray(image)
+    if array.ndim == 4 and array.shape[0] == 1:
+        array = array[0]
+    if array.ndim == 3 and array.shape[0] in (1, 3, 4) and array.shape[-1] not in (1, 3, 4):
+        array = np.transpose(array, (1, 2, 0))
+    if array.ndim == 2:
+        array = array[..., None]
+    if array.ndim != 3:
+        raise ValueError(f"Cannot convert image with shape {array.shape} to HWC image")
+
+    if np.issubdtype(array.dtype, np.floating):
+        array = np.clip(array, 0.0, 1.0) * 255.0
+    array = np.clip(array, 0, 255).astype(np.uint8)
+    if array.shape[-1] == 1:
+        array = array[..., 0]
+    return array
+
+
+def save_image(image: Any, path: Path) -> None:
+    if hasattr(image, "save"):
+        image.save(path)
+        return
+    if isinstance(image, dict):
+        for key in ("image", "pil_image", "data"):
+            if key in image:
+                save_image(image[key], path)
+                return
+    for attr in ("image", "pil_image", "data"):
+        if hasattr(image, attr):
+            save_image(getattr(image, attr), path)
+            return
+
+    from PIL import Image
+
+    Image.fromarray(_to_uint8_hwc_array(image)).save(path)
+
+
+def save_generated_images(images: Any, *, args: argparse.Namespace, prompt_case: PromptCase, sample_index: int) -> tuple[Path, ...]:
+    output_dir = Path(args.output_dir).expanduser()
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    image_items = images if isinstance(images, Sequence) and not isinstance(images, (str, bytes)) else [images]
+    saved_paths: list[Path] = []
+    for image_index, image in enumerate(image_items):
+        path = output_dir / (
+            f"prompt_{prompt_case.row_index:06d}_{prompt_case.uid}_"
+            f"sample_{sample_index:02d}_image_{image_index:02d}.png"
+        )
+        save_image(image, path)
+        saved_paths.append(path)
+    return tuple(saved_paths)
+
+
 async def run_rollouts(args: argparse.Namespace, prompt_cases: list[PromptCase]) -> list[RolloutSample]:
     from vllm_omni.entrypoints.async_omni import AsyncOmni
 
@@ -222,17 +284,25 @@ async def run_rollouts(args: argparse.Namespace, prompt_cases: list[PromptCase])
 
                 custom_output = final_output.custom_output or {}
                 validate_custom_output(custom_output, expect_negative=args.guidance_scale > 1.0)
+                image_paths = save_generated_images(
+                    final_output.images,
+                    args=args,
+                    prompt_case=prompt_case,
+                    sample_index=sample_index,
+                )
                 samples.append(
                     RolloutSample(
                         uid=prompt_case.uid,
                         sample_index=sample_index,
                         score=score_for_pair_selection(custom_output),
                         custom_output=custom_output,
+                        image_paths=image_paths,
                     )
                 )
                 print(
                     f"[rollout] uid={prompt_case.uid} sample={sample_index} "
-                    f"score={samples[-1].score:.6f} latents={tuple(custom_output['image_latents'].shape)}"
+                    f"score={samples[-1].score:.6f} latents={tuple(custom_output['image_latents'].shape)} "
+                    f"saved={','.join(str(path) for path in image_paths)}"
                 )
     finally:
         engine.shutdown()
