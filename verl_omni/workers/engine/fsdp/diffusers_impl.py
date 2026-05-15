@@ -59,7 +59,6 @@ from verl.workers.engine.base import BaseEngine, BaseEngineCtx, EngineRegistry
 from verl.workers.engine.fsdp.utils import create_device_mesh, get_sharding_strategy
 from verl.workers.engine.utils import enable_full_determinism, prepare_micro_batches
 
-from verl_omni.pipelines.model_base import DiffusionModelBase
 from verl_omni.pipelines.utils import build_scheduler, forward_and_sample_previous_step, prepare_model_inputs
 from verl_omni.utils.fsdp_utils import collect_lora_params
 from verl_omni.workers.config import DiffusionModelConfig
@@ -498,15 +497,13 @@ class DiffusersFSDPEngine(BaseEngine):
                 if is_dpo:
                     # DPO is a one-shot flow-matching objective over final image latents,
                     # not a reversed-sampling objective over every rollout timestep.
-                    loss, meta_info = self.forward_batch(
-                        micro_batch, loss_function=loss_function, forward_only=forward_only
+                    loss, meta_info = self.forward_step(
+                        micro_batch,
+                        loss_function=loss_function,
+                        forward_only=forward_only,
+                        step=None,  # use random step for DPO
                     )
 
-                    if not forward_only:
-                        loss.backward()
-
-                    for key, val in meta_info.items():
-                        meta_info_lst[key].append(val)
                 else:
                     # Forward and backward for each timestep
                     for step in range(num_timesteps):
@@ -514,11 +511,11 @@ class DiffusersFSDPEngine(BaseEngine):
                             micro_batch, loss_function=loss_function, forward_only=forward_only, step=step
                         )
 
-                        if not forward_only:
-                            loss.backward()
+                if not forward_only:
+                    loss.backward()
 
-                        for key, val in meta_info.items():
-                            meta_info_lst[key].append(val)
+                for key, val in meta_info.items():
+                    meta_info_lst[key].append(val)
 
             output_lst.append(meta_info_lst)
 
@@ -559,44 +556,6 @@ class DiffusersFSDPEngine(BaseEngine):
         }
 
         return output
-
-    def forward_batch(self, micro_batch: TensorDict, loss_function, forward_only):
-        model_cls = DiffusionModelBase.get_class(self.model_config)
-        if not hasattr(model_cls, "forward_batch"):
-            raise NotImplementedError(f"{model_cls.__name__} must implement `forward_batch` for algorithm='dpo'.")
-
-        model_output = model_cls.forward_batch(
-            module=self.module,
-            scheduler=self.scheduler,
-            model_config=self.model_config,
-            micro_batch=micro_batch,
-        )
-
-        if loss_function is not None:
-            data = tu.get_tensordict({"sample_level_scores": micro_batch["sample_level_scores"]})
-            uid = tu.get_non_tensor_data(micro_batch, "uid", default=None)
-            tu.assign_non_tensor(
-                data,
-                gradient_accumulation_steps=tu.get_non_tensor_data(
-                    micro_batch, "gradient_accumulation_steps", default=None
-                ),
-                sp_size=tu.get_non_tensor_data(micro_batch, "sp_size", default=None),
-            )
-            if uid is not None:
-                tu.assign_non_tensor(data, uid=uid)
-            loss, metrics = loss_function(model_output=model_output, data=data, dp_group=self.get_data_parallel_group())
-        else:
-            assert forward_only, "forward_only must be True when loss_function is None"
-            loss = torch.tensor(1.0, device=device_name)
-            metrics = {}
-
-        output = {
-            "model_output": model_output,
-            "loss": loss.detach().item(),
-            "metrics": metrics,
-        }
-
-        return loss, output
 
     @staticmethod
     def _unpad_nested_embeds(embeds: torch.Tensor, mask: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -942,7 +901,6 @@ class DiffusersDPOFSDPEngine(DiffusersFSDPEngine):
 
         noisy_latents = (1.0 - sigmas) * latents + sigmas * noise
         target = noise - latents
-
         prompt_embeds = micro_batch["prompt_embeds"]
         prompt_embeds_mask = micro_batch.get("prompt_embeds_mask", None)
         negative_prompt_embeds = micro_batch.get("negative_prompt_embeds", None)
@@ -956,7 +914,7 @@ class DiffusersDPOFSDPEngine(DiffusersFSDPEngine):
             )
         )
 
-        model_inputs, _ = prepare_model_inputs(
+        model_inputs, negative_model_inputs = prepare_model_inputs(
             module=self.module,
             model_config=self.model_config,
             latents=noisy_latents,
@@ -968,31 +926,33 @@ class DiffusersDPOFSDPEngine(DiffusersFSDPEngine):
             micro_batch=micro_batch,
             step=0,
         )
-        return model_inputs, {"target": target, "timesteps": timesteps}
+        return model_inputs, negative_model_inputs, {"target": target, "timesteps": timesteps}
 
     def prepare_model_outputs(self, output, micro_batch: TensorDict):
         del micro_batch
 
-        raw_output, dpo_context = output
-        if isinstance(raw_output, (tuple, list)):
-            model_pred = raw_output[0]
-        elif hasattr(raw_output, "sample"):
-            model_pred = raw_output.sample
-        else:
-            model_pred = raw_output
+        noise_pred, dpo_context = output
 
         target = dpo_context["target"]
-        mse = torch.nn.functional.mse_loss(model_pred.float(), target.float(), reduction="none")
+        mse = torch.nn.functional.mse_loss(noise_pred.float(), target.float(), reduction="none")
         reduce_dims = tuple(range(1, mse.ndim))
         return {
             "mse": mse.mean(dim=reduce_dims),
             "timesteps": dpo_context["timesteps"],
         }
 
-    def forward_batch(self, micro_batch: TensorDict, loss_function, forward_only):
-        model_inputs, dpo_context = self.prepare_model_inputs(micro_batch=micro_batch, step=0)
-        raw_output = self.module(**model_inputs)
-        model_output = self.prepare_model_outputs(output=(raw_output, dpo_context), micro_batch=micro_batch)
+    def forward_step(self, micro_batch: TensorDict, loss_function, forward_only, step):
+        model_inputs, negative_model_inputs, dpo_context = self.prepare_model_inputs(micro_batch=micro_batch, step=step)
+        noise_pred = forward_and_sample_previous_step(
+            module=self.module,
+            scheduler=self.scheduler,
+            model_config=self.model_config,
+            model_inputs=model_inputs,
+            negative_model_inputs=negative_model_inputs,
+            scheduler_inputs=micro_batch,
+            step=step,
+        )
+        model_output = self.prepare_model_outputs(output=(noise_pred, dpo_context), micro_batch=micro_batch)
 
         if loss_function is not None:
             data = tu.get_tensordict({"sample_level_scores": micro_batch["sample_level_scores"]})
