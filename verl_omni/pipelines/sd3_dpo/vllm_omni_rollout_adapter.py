@@ -213,15 +213,22 @@ class StableDiffusion3DPOPipeline(StableDiffusion3Pipeline):
             decode_latents = (decode_latents / self.vae.config.scaling_factor) + self.vae.config.shift_factor
             image = self.vae.decode(decode_latents, return_dict=False)[0]
 
+        prompt_embeds_mask = torch.ones(prompt_embeds.shape[0], prompt_embeds.shape[1], dtype=torch.int32).to(prompt_embeds.device)
+        negative_prompt_embeds_mask = None
+        if do_cfg:
+            negative_prompt_embeds_mask = torch.ones(negative_prompt_embeds.shape[0], negative_prompt_embeds.shape[1], dtype=torch.int32).to(negative_prompt_embeds.device)
+
         return DiffusionOutput(
             output=_maybe_to_cpu(image),
             custom_output={
                 "image_latents": _maybe_to_cpu(image_latents),
                 "prompt_embeds": _maybe_to_cpu(prompt_embeds),
-                "prompt_embeds_mask": None,
+                "prompt_embeds_mask": _maybe_to_cpu(prompt_embeds_mask),
                 "pooled_prompt_embeds": _maybe_to_cpu(pooled_prompt_embeds),
                 "negative_prompt_embeds": _maybe_to_cpu(negative_prompt_embeds) if do_cfg else None,
-                "negative_prompt_embeds_mask": None,
+                "negative_prompt_embeds_mask": _maybe_to_cpu(negative_prompt_embeds_mask)
+                if negative_prompt_embeds_mask is not None
+                else None,
                 "negative_pooled_prompt_embeds": _maybe_to_cpu(negative_pooled_prompt_embeds) if do_cfg else None,
             },
         )
