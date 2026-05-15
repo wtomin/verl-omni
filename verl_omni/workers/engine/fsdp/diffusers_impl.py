@@ -558,24 +558,30 @@ class DiffusersFSDPEngine(BaseEngine):
         return output
 
     @staticmethod
-    def _unpad_nested_embeds(embeds: torch.Tensor, mask: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        """Convert a jagged nested tensor pair (embeds, mask) to dense padded tensors."""
+    def _unpad_nested_embeds(embeds: torch.Tensor, mask: torch.Tensor | None) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """Convert jagged nested embeds, and an optional nested mask, to dense padded tensors."""
         batch_size = embeds.size(0)
         max_seq_len = max(embeds.offsets().diff())
         embed_dim = embeds.size(-1)
         embeds = torch.nested.to_padded_tensor(embeds, padding=0, output_size=(batch_size, max_seq_len, embed_dim))
-        mask = torch.nested.to_padded_tensor(mask, padding=0, output_size=(batch_size, max_seq_len))
+        if mask is None:
+            return embeds, None
+        if mask.is_nested:
+            mask = torch.nested.to_padded_tensor(mask, padding=0, output_size=(batch_size, max_seq_len))
         return embeds, mask
 
     @staticmethod
-    def _pad_embeds_for_sp(embeds: torch.Tensor, mask: torch.Tensor, sp_size: int) -> tuple[torch.Tensor, torch.Tensor]:
+    def _pad_embeds_for_sp(
+        embeds: torch.Tensor, mask: torch.Tensor | None, sp_size: int
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """Pad sequence dimension of (embeds, mask) to a multiple of sp_size."""
         seq_len = embeds.size(1)
         aligned_seq_len = (seq_len + sp_size - 1) // sp_size * sp_size
         if aligned_seq_len > seq_len:
             pad_len = aligned_seq_len - seq_len
             embeds = torch.nn.functional.pad(embeds, (0, 0, 0, pad_len))
-            mask = torch.nn.functional.pad(mask, (0, pad_len))
+            if mask is not None:
+                mask = torch.nn.functional.pad(mask, (0, pad_len))
         return embeds, mask
 
     def _prepare_prompt_embeds(
@@ -587,6 +593,12 @@ class DiffusersFSDPEngine(BaseEngine):
     ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
         """Apply common nested-tensor and sequence-parallel padding to prompt embeds."""
         sp_size = self.ulysses_sequence_parallel_size if self.use_ulysses_sp else 1
+        if not isinstance(prompt_embeds_mask, torch.Tensor):
+            prompt_embeds_mask = None
+        if not isinstance(negative_prompt_embeds, torch.Tensor):
+            negative_prompt_embeds = None
+        if not isinstance(negative_prompt_embeds_mask, torch.Tensor):
+            negative_prompt_embeds_mask = None
 
         if prompt_embeds.is_nested:
             prompt_embeds, prompt_embeds_mask = self._unpad_nested_embeds(prompt_embeds, prompt_embeds_mask)
