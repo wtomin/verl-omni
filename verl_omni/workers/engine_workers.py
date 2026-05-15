@@ -543,10 +543,17 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             )
 
             # assign engine configs
-            ref_training_config.engine_config.infer_micro_batch_size_per_gpu = (
-                self.config.ref.ppo_micro_batch_size_per_gpu
-            )
+            ref_infer_micro_bsz = self.config.ref.ppo_micro_batch_size_per_gpu
+            if ref_infer_micro_bsz is None and is_diffusion:
+                # prepare_micro_batches requires a finite micro-batch; align with actor training micro-batch.
+                ref_infer_micro_bsz = self.config.actor.ppo_micro_batch_size_per_gpu
+            ref_training_config.engine_config.infer_micro_batch_size_per_gpu = ref_infer_micro_bsz
             ref_training_config.engine_config.use_remove_padding = model_config.get("use_remove_padding", False)
+            if is_diffusion:
+                assert ref_training_config.engine_config.infer_micro_batch_size_per_gpu is not None, (
+                    "Diffusion ref infer_batch requires ref.log_prob_micro_batch_size_per_gpu or "
+                    "actor.ppo_micro_batch_size_per_gpu (used by prepare_micro_batches)."
+                )
             if not is_diffusion:
                 ref_training_config.engine_config.use_dynamic_bsz = self.config.ref.use_dynamic_bsz
                 ref_training_config.engine_config.infer_max_token_len_per_gpu = (
@@ -579,8 +586,13 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 actor_training_config.engine_config.micro_batch_size_per_gpu = (
                     self.config.actor.ppo_micro_batch_size_per_gpu
                 )
-                actor_training_config.engine_config.infer_micro_batch_size_per_gpu = self.config.rollout.get(
-                    "log_prob_micro_batch_size_per_gpu", None
+                actor_infer_micro_bsz = self.config.rollout.get("log_prob_micro_batch_size_per_gpu", None)
+                if actor_infer_micro_bsz is None:
+                    actor_infer_micro_bsz = self.config.actor.ppo_micro_batch_size_per_gpu
+                actor_training_config.engine_config.infer_micro_batch_size_per_gpu = actor_infer_micro_bsz
+                assert actor_training_config.engine_config.infer_micro_batch_size_per_gpu is not None, (
+                    "Diffusion infer_batch requires rollout.log_prob_micro_batch_size_per_gpu or "
+                    "actor.ppo_micro_batch_size_per_gpu (used by prepare_micro_batches)."
                 )
             else:
                 actor_use_dynamic_bsz = self.config.actor.get("use_dynamic_bsz", False)
