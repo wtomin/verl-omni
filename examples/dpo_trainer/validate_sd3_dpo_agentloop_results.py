@@ -16,8 +16,8 @@
 
 This script is intentionally standalone: it reads a real prompt parquet, runs
 the same vLLM-Omni SD3 DPO custom pipeline used by ``diffusion_single_turn_agent``,
-then verifies the rollout tensors can drive the SD3 DPO training adapter and
-DPO loss on GPU.
+scores the generated images with the configured reward model, then verifies the
+rollout tensors can drive the SD3 DPO training adapter and DPO loss on GPU.
 """
 
 from __future__ import annotations
@@ -25,6 +25,9 @@ from __future__ import annotations
 import argparse
 import asyncio
 import gc
+import importlib
+import importlib.util
+import inspect
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -44,6 +47,9 @@ from verl_omni.workers.config import DiffusionActorConfig, DiffusionLossConfig
 
 CUSTOM_PIPELINE_CLASS = "verl_omni.pipelines.sd3_dpo.vllm_omni_rollout_adapter.StableDiffusion3DPOPipeline"
 REQUIRED_CUSTOM_OUTPUT_KEYS = ("image_latents", "prompt_embeds", "pooled_prompt_embeds")
+DEFAULT_REWARD_MODEL = "CodeGoat24/UnifiedReward-2.0-qwen3vl-8b"
+DEFAULT_REWARD_FUNCTION_PATH = "verl_omni/utils/reward_score/unified_reward.py"
+DEFAULT_REWARD_FUNCTION_NAME = "compute_score_unified_reward"
 
 
 @dataclass(frozen=True)
@@ -52,6 +58,9 @@ class PromptCase:
     prompt: str
     negative_prompt: str
     row_index: int
+    data_source: str
+    ground_truth: str
+    extra_info: dict[str, Any]
 
 
 @dataclass(frozen=True)
@@ -87,6 +96,26 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dtype", choices=("bfloat16", "float16", "float32"), default="bfloat16")
     parser.add_argument("--dpo-beta", type=float, default=2000.0)
     parser.add_argument(
+        "--reward-router-address",
+        default=None,
+        help="OpenAI-compatible reward router address, e.g. 127.0.0.1:8000. Required for UnifiedReward scoring.",
+    )
+    parser.add_argument(
+        "--reward-model",
+        default=DEFAULT_REWARD_MODEL,
+        help="Reward model name/path forwarded to the custom reward function.",
+    )
+    parser.add_argument(
+        "--reward-function-path",
+        default=DEFAULT_REWARD_FUNCTION_PATH,
+        help="Custom reward function file/module path, matching reward.custom_reward_function.path in training.",
+    )
+    parser.add_argument(
+        "--reward-function-name",
+        default=DEFAULT_REWARD_FUNCTION_NAME,
+        help="Custom reward function name, matching reward.custom_reward_function.name in training.",
+    )
+    parser.add_argument(
         "--output-dir",
         default="outputs/sd3_dpo_agentloop_validation",
         help="Directory used to save generated rollout images.",
@@ -94,7 +123,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--skip-training-forward",
         action="store_true",
-        help="Only validate rollout custom_output. By default, the script also loads the diffusers transformer.",
+        help="Skip the training adapter check after rollout and reward validation.",
     )
     return parser.parse_args()
 
@@ -105,6 +134,12 @@ def torch_dtype(name: str) -> torch.dtype:
         "float16": torch.float16,
         "float32": torch.float32,
     }[name]
+
+
+def _as_dict(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return dict(value)
+    return {}
 
 
 def load_prompt_cases(args: argparse.Namespace) -> list[PromptCase]:
@@ -119,12 +154,18 @@ def load_prompt_cases(args: argparse.Namespace) -> list[PromptCase]:
         negative_prompt = stringify_prompt_messages(row.get("negative_prompt", ""))
         if not prompt:
             continue
+        extra_info = _as_dict(row.get("extra_info"))
+        extra_info.setdefault("raw_prompt", prompt)
+        reward_model = _as_dict(row.get("reward_model"))
         cases.append(
             PromptCase(
                 uid=f"prompt-{row_index}",
                 prompt=prompt,
                 negative_prompt=negative_prompt,
                 row_index=int(row_index),
+                data_source=str(row.get("data_source", "sd3_dpo_validation")),
+                ground_truth=str(reward_model.get("ground_truth", "")),
+                extra_info=extra_info,
             )
         )
         if len(cases) >= args.num_prompts:
@@ -193,10 +234,100 @@ def validate_custom_output(custom_output: dict, *, expect_negative: bool) -> Non
                 raise AssertionError(f"guidance_scale > 1 requires custom_output[{key!r}]")
 
 
-def score_for_pair_selection(custom_output: dict) -> float:
-    """A deterministic local score used only to form chosen/rejected DPO pairs."""
-    latents = custom_output["image_latents"].float()
-    return -latents.square().mean().item()
+def load_reward_function(args: argparse.Namespace):
+    reward_path = Path(args.reward_function_path).expanduser()
+    if reward_path.exists():
+        spec = importlib.util.spec_from_file_location(f"_sd3_dpo_validation_reward_{reward_path.stem}", reward_path)
+        if spec is None or spec.loader is None:
+            raise ImportError(f"Cannot load reward function module from {reward_path}")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+    else:
+        module_name = args.reward_function_path.removesuffix(".py").replace("/", ".").replace("\\", ".")
+        module = importlib.import_module(module_name)
+
+    reward_fn = getattr(module, args.reward_function_name)
+    signature = inspect.signature(reward_fn)
+    reward_router_param = signature.parameters.get("reward_router_address")
+    if (
+        reward_router_param is not None
+        and reward_router_param.default is inspect.Parameter.empty
+        and args.reward_router_address is None
+    ):
+        raise ValueError(
+            f"--reward-router-address is required by {args.reward_function_path}:{args.reward_function_name}"
+        )
+    return reward_fn
+
+
+def _accepts_kwarg(fn, name: str) -> bool:
+    signature = inspect.signature(fn)
+    return name in signature.parameters or any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in signature.parameters.values()
+    )
+
+
+def _first_generated_image(images: Any) -> Any:
+    if isinstance(images, Sequence) and not isinstance(images, (str, bytes)):
+        if not images:
+            raise ValueError("No generated images available for reward scoring")
+        return images[0]
+    return images
+
+
+def _to_reward_image_tensor(image: Any) -> torch.Tensor:
+    """Match the agent-loop server path: reward sees a CHW float image in [0, 1]."""
+    array = _to_uint8_hwc_array(image)
+    if array.ndim == 2:
+        array = np.stack([array, array, array], axis=-1)
+    if array.shape[-1] == 1:
+        array = np.repeat(array, 3, axis=-1)
+    if array.shape[-1] == 4:
+        array = array[..., :3]
+    if array.shape[-1] != 3:
+        raise ValueError(f"Reward image must have 3 channels after conversion, got shape {array.shape}")
+    return torch.from_numpy(array).permute(2, 0, 1).float() / 255.0
+
+
+async def compute_reward_model_score(
+    reward_fn,
+    args: argparse.Namespace,
+    *,
+    prompt_case: PromptCase,
+    response_image: torch.Tensor,
+) -> tuple[float, dict[str, Any]]:
+    kwargs: dict[str, Any] = {
+        "data_source": prompt_case.data_source,
+        "solution_image": response_image,
+        "ground_truth": prompt_case.ground_truth,
+        "extra_info": dict(prompt_case.extra_info),
+    }
+    reward_kwargs = {
+        "reward_router_address": args.reward_router_address,
+        "reward_model_tokenizer": None,
+        "model_name": args.reward_model,
+    }
+    kwargs.update(
+        {
+            key: value
+            for key, value in reward_kwargs.items()
+            if value is not None and _accepts_kwarg(reward_fn, key)
+        }
+    )
+
+    if inspect.iscoroutinefunction(reward_fn):
+        result = await reward_fn(**kwargs)
+    else:
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(None, lambda: reward_fn(**kwargs))
+
+    if isinstance(result, dict):
+        score = float(result["score"])
+        reward_extra_info = dict(result)
+    else:
+        score = float(result)
+        reward_extra_info = {"acc": score}
+    return score, reward_extra_info
 
 
 def _to_uint8_hwc_array(image: Any) -> np.ndarray:
@@ -237,7 +368,13 @@ def save_image(image: Any, path: Path) -> None:
     Image.fromarray(_to_uint8_hwc_array(image)).save(path)
 
 
-def save_generated_images(images: Any, *, args: argparse.Namespace, prompt_case: PromptCase, sample_index: int) -> tuple[Path, ...]:
+def save_generated_images(
+    images: Any,
+    *,
+    args: argparse.Namespace,
+    prompt_case: PromptCase,
+    sample_index: int,
+) -> tuple[Path, ...]:
     output_dir = Path(args.output_dir).expanduser()
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -256,6 +393,7 @@ def save_generated_images(images: Any, *, args: argparse.Namespace, prompt_case:
 async def run_rollouts(args: argparse.Namespace, prompt_cases: list[PromptCase]) -> list[RolloutSample]:
     from vllm_omni.entrypoints.async_omni import AsyncOmni
 
+    reward_fn = load_reward_function(args)
     engine = AsyncOmni(
         model=args.model,
         custom_pipeline_args={"pipeline_class": CUSTOM_PIPELINE_CLASS},
@@ -289,18 +427,26 @@ async def run_rollouts(args: argparse.Namespace, prompt_cases: list[PromptCase])
                     prompt_case=prompt_case,
                     sample_index=sample_index,
                 )
+                response_image = _to_reward_image_tensor(_first_generated_image(final_output.images))
+                score, reward_extra_info = await compute_reward_model_score(
+                    reward_fn,
+                    args,
+                    prompt_case=prompt_case,
+                    response_image=response_image,
+                )
                 samples.append(
                     RolloutSample(
                         uid=prompt_case.uid,
                         sample_index=sample_index,
-                        score=score_for_pair_selection(custom_output),
+                        score=score,
                         custom_output=custom_output,
                         image_paths=image_paths,
                     )
                 )
                 print(
                     f"[rollout] uid={prompt_case.uid} sample={sample_index} "
-                    f"score={samples[-1].score:.6f} latents={tuple(custom_output['image_latents'].shape)} "
+                    f"reward_score={samples[-1].score:.6f} latents={tuple(custom_output['image_latents'].shape)} "
+                    f"reward_extra_keys={sorted(reward_extra_info.keys())} "
                     f"saved={','.join(str(path) for path in image_paths)}"
                 )
     finally:
@@ -434,7 +580,7 @@ def main() -> None:
     torch.cuda.empty_cache()
 
     if args.skip_training_forward:
-        print("[ok] rollout custom_output validation passed; skipped training adapter check")
+        print("[ok] rollout custom_output and reward validation passed; skipped training adapter check")
         return
 
     run_training_and_dpo_checks(args, paired_samples)
