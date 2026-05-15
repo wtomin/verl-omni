@@ -77,7 +77,10 @@ class StableDiffusion3DPO(DiffusionModelBase):
         latents: (B, C, H, W)  # already-noised latents
         timesteps: (B,)
         """
-        del prompt_embeds_mask, negative_prompt_embeds_mask, step
+        if prompt_embeds_mask is not None:
+            raise ValueError("prompt_embeds_mask is not supported for DPO training.")
+        if negative_prompt_embeds_mask is not None:
+            raise ValueError("negative_prompt_embeds_mask is not supported for DPO training.")
 
         pooled_prompt_embeds = micro_batch.get("pooled_prompt_embeds", None)
         negative_pooled_prompt_embeds = micro_batch.get("negative_pooled_prompt_embeds", None)
@@ -107,7 +110,6 @@ class StableDiffusion3DPO(DiffusionModelBase):
         if model_inputs["pooled_prompt_embeds"] is None:
             raise KeyError("SD3 DPO training requires `pooled_prompt_embeds` in the micro batch.")
 
-        del module
         return model_inputs, negative_model_inputs
 
     @staticmethod
@@ -138,7 +140,6 @@ class StableDiffusion3DPO(DiffusionModelBase):
         step: int,
     ) -> torch.Tensor:
         """Run a single SD3 DPO transformer forward and return predicted noise."""
-        del scheduler, scheduler_inputs, step
 
         noise_pred = module(**model_inputs)[0]
         guidance_scale = model_config.pipeline.guidance_scale
