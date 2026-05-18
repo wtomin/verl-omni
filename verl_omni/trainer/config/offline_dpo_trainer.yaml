@@ -1,0 +1,75 @@
+# Offline DPO Training Configuration for SD3 (Stable Diffusion 3.x)
+# Format checks enforced on CI:
+# 1. Comments must appear above each field.
+# 2. There must be a blank line between each field.
+# 3. In-line comments (after a field on the same line) are not allowed.
+# 4. Indentation level is respected for nested fields.
+
+# Inherit the online DPO config and override only the offline-specific behavior.
+defaults:
+
+  # Base online DPO configuration.
+  - dpo_trainer
+
+  # Apply this file after the inherited DPO config.
+  - _self_
+
+# Offline DPO keeps the DPO objective but consumes pre-ranked image pairs.
+algorithm:
+
+  # DPO data mode. "offline" skips training-time rollout, reward scoring and pair selection.
+  dpo_mode: offline
+
+# Offline pair data configuration.
+data:
+
+  # Enable the offline DPO dataset that expands each row into adjacent win/lose samples.
+  offline_dpo: true
+
+  # Column containing the winning image path.
+  img_win_key: img_win
+
+  # Column containing the losing image path.
+  img_lose_key: img_lose
+
+  # Column containing the winning image score.
+  win_score_key: win_score
+
+  # Column containing the losing image score.
+  lose_score_key: lose_score
+
+  # Default negative prompt used when the data file does not provide one.
+  default_negative_prompt: " "
+
+  # Batch size counts logical prompt pairs before expansion to win/lose rows.
+  gen_batch_size: ${data.train_batch_size}
+
+# Offline training does not score rewards during training.
+reward:
+
+  # Disable reward workers for offline DPO training.
+  enable: false
+
+  # Reward model configuration.
+  reward_model:
+
+    # Disable reward model workers for offline DPO training.
+    enable: false
+
+    # Do not allocate a separate reward resource pool.
+    enable_resource_pool: false
+
+# Trainer behavior for offline DPO.
+trainer:
+
+  # Validation generation still requires rollout; disable by default for pure offline training.
+  val_before_train: false
+
+  # Disable periodic validation by default for pure offline training.
+  test_freq: -1
+
+  # Project name for experiment tracking.
+  project_name: verl_offline_dpo_examples
+
+  # Experiment name for run identification.
+  experiment_name: sd3_offline_dpo

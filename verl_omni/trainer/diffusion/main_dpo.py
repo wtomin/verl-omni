@@ -104,7 +104,12 @@ class TaskRunner:
             lora_rank = config.actor_rollout_ref.model.get("lora_rank", 0)
         ref_in_actor = lora_rank > 0 or config.actor_rollout_ref.model.get("lora_adapter_path") is not None
         needs_dpo_reference = config.algorithm.adv_estimator == DiffusionAdvantageEstimator.DPO.value
-        if (need_reference_policy(config) or needs_dpo_reference) and not ref_in_actor:
+        offline_dpo = needs_dpo_reference and config.algorithm.get("dpo_mode", "online") == "offline"
+        if offline_dpo:
+            if not hasattr(Role, "Actor"):
+                raise ValueError("Offline DPO without rollout requires verl Role.Actor support.")
+            role = Role.Actor
+        elif (need_reference_policy(config) or needs_dpo_reference) and not ref_in_actor:
             role = Role.ActorRolloutRef
         else:
             role = Role.ActorRollout
@@ -147,7 +152,17 @@ class TaskRunner:
 
     def add_ref_policy_worker(self, config, ref_policy_cls):
         """Add a reference policy worker if the selected setup needs one."""
-        del config, ref_policy_cls
+        from verl.trainer.ppo.ray_trainer import Role
+
+        lora_rank = config.actor_rollout_ref.model.get("lora", {}).get("rank", 0)
+        if lora_rank <= 0:
+            lora_rank = config.actor_rollout_ref.model.get("lora_rank", 0)
+        ref_in_actor = lora_rank > 0 or config.actor_rollout_ref.model.get("lora_adapter_path") is not None
+        needs_dpo_reference = config.algorithm.adv_estimator == DiffusionAdvantageEstimator.DPO.value
+        offline_dpo = needs_dpo_reference and config.algorithm.get("dpo_mode", "online") == "offline"
+        if offline_dpo and not ref_in_actor:
+            self.role_worker_mapping[Role.RefPolicy] = ray.remote(ref_policy_cls)
+            self.mapping[Role.RefPolicy] = "global_pool"
         return
 
     def run(self, config):
