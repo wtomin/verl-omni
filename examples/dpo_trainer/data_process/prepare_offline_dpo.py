@@ -140,6 +140,20 @@ def _wait_for_reward_server(host: str, port: int, timeout_s: int) -> None:
     raise TimeoutError(f"Reward server did not become ready at {url} within {timeout_s}s: {last_error}")
 
 
+def _apply_gpu_device_defaults(args: argparse.Namespace) -> None:
+    """Prefer reward on the first GPU and image gen on the second; share GPU 0 when only one is visible."""
+    n = torch.cuda.device_count()
+    if n <= 1:
+        args.reward_gpu = 0
+        args.image_gpu = 0
+    else:
+        args.reward_gpu = 0 if args.reward_gpu is None else args.reward_gpu
+        args.image_gpu = 1 if args.image_gpu is None else args.image_gpu
+
+    if args.device is None:
+        args.device = f"cuda:{args.image_gpu}" if torch.cuda.is_available() else "cpu"
+
+
 @contextmanager
 def _maybe_launch_reward_server(args: argparse.Namespace):
     if not args.launch_reward_server:
@@ -154,8 +168,14 @@ def _maybe_launch_reward_server(args: argparse.Namespace):
         host=args.reward_server_host,
         port=args.reward_server_port,
     )
-    print(f"Launching reward server: {command}")
-    process = subprocess.Popen(shlex.split(command))
+    env = os.environ.copy()
+    if torch.cuda.is_available():
+        env["CUDA_VISIBLE_DEVICES"] = str(args.reward_gpu)
+    print(
+        f"Launching reward server (CUDA device index {args.reward_gpu}, "
+        f"CUDA_VISIBLE_DEVICES={env.get('CUDA_VISIBLE_DEVICES')}): {command}"
+    )
+    process = subprocess.Popen(shlex.split(command), env=env)
     try:
         _wait_for_reward_server(args.reward_server_host, args.reward_server_port, args.reward_server_startup_timeout)
         print(f"Reward server is ready at {args.reward_router_address}")
@@ -260,7 +280,34 @@ def main():
     parser.add_argument("--guidance_scale", type=float, default=4.0)
     parser.add_argument("--max_sequence_length", type=int, default=256)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--device", default="cuda")
+    parser.add_argument(
+        "--device",
+        default=None,
+        help=(
+            "Diffusers device (e.g. cuda:1). "
+            "Default: cuda:0 on a single visible GPU; cuda:1 on the second GPU when two or more are visible."
+        ),
+    )
+    parser.add_argument(
+        "--reward-gpu",
+        type=int,
+        default=None,
+        dest="reward_gpu",
+        help=(
+            "Physical CUDA device index for the vLLM reward server (via CUDA_VISIBLE_DEVICES). "
+            "Default: 0, or forced to 0 when only one GPU is visible."
+        ),
+    )
+    parser.add_argument(
+        "--image-gpu",
+        type=int,
+        default=None,
+        dest="image_gpu",
+        help=(
+            "CUDA device index for image generation when --device is not set. "
+            "Default: 0 with one visible GPU, else 1 (second GPU)."
+        ),
+    )
     parser.add_argument("--dtype", choices=["float16", "bfloat16", "float32"], default="bfloat16")
     parser.add_argument("--max_samples", type=int, default=-1)
     parser.add_argument("--reward_function_path", default=None)
@@ -286,6 +333,8 @@ def main():
     parser.add_argument("--disable_progress", action="store_true")
     parser.add_argument("--split", default=None, help="Optional split name stored in extra_info.split.")
     args = parser.parse_args()
+    _apply_gpu_device_defaults(args)
+    print(f"Image generation device: {args.device}.")
 
     if args.num_images_per_prompt < 2:
         raise ValueError("--num_images_per_prompt must be at least 2 for DPO pair construction.")
