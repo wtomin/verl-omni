@@ -11,18 +11,15 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Preprocess prompt-only text files into parquet rows for diffusion DPO/RLHF data loading.
+"""Preprocess a prompt-only text file into parquet rows for diffusion DPO/RLHF data loading.
 
-Input files are UTF-8 text files with one prompt per line:
-
-    train.txt
-    test.txt
+The input file is a UTF-8 text file with one prompt per line.
 
 Example:
 
     python3 examples/dpo_trainer/data_process/prepare_online_dpo.py \
-        --input_dir dataset/my_prompts \
-        --output_dir data/my_prompts \
+        --input_file dataset/my_prompts/train_prompts.txt \
+        --output_file data/my_prompts/train.parquet \
         --data_source online_dpo \
         --system_prompt "You are a helpful image generation assistant."
 
@@ -103,39 +100,37 @@ def _build_rows(
     return rows
 
 
-def _write_split(
+def _write_file(
     *,
-    input_dir: Path,
-    output_dir: Path,
-    split_name: str,
-    output_name: str,
+    input_path: Path,
+    output_path: Path,
     data_source: str,
     ability: str,
     system_prompt: str,
     negative_prompt: str,
+    split: str,
 ) -> Path:
-    input_path = input_dir / f"{split_name}.txt"
     if not input_path.exists():
         raise FileNotFoundError(f"Expected input file: {input_path}")
 
     rows = _build_rows(
         _read_prompts(input_path),
-        split=split_name,
+        split=split,
         data_source=data_source,
         ability=ability,
         system_prompt=system_prompt,
         negative_prompt=negative_prompt,
     )
-    output_path = output_dir / output_name
+    output_path.parent.mkdir(parents=True, exist_ok=True)
     pd.DataFrame(rows).to_parquet(output_path)
-    print(f"Wrote {len(rows)} {split_name} samples to {output_path}")
+    print(f"Wrote {len(rows)} samples to {output_path}")
     return output_path
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Convert prompt-only train/test txt files to parquet.")
-    parser.add_argument("--input_dir", required=True, help="Directory containing train.txt and test.txt.")
-    parser.add_argument("--output_dir", required=True, help="Directory to write train.parquet and test.parquet.")
+    parser = argparse.ArgumentParser(description="Convert one prompt-only text file to one parquet file.")
+    parser.add_argument("--input_file", required=True, help="UTF-8 text file containing one prompt per line.")
+    parser.add_argument("--output_file", required=True, help="Parquet file to write.")
     parser.add_argument(
         "--data_source",
         default="online_dpo",
@@ -157,41 +152,30 @@ def main():
         default=" ",
         help="Negative user prompt for classifier-free guidance.",
     )
-    parser.add_argument("--hdfs_dir", default=None, help="Optional HDFS destination for the output directory.")
+    parser.add_argument("--split", default=None, help="Optional split name stored in extra_info.split.")
+    parser.add_argument("--hdfs_dir", default=None, help="Optional HDFS destination for the output parquet file.")
     args = parser.parse_args()
 
-    input_dir = Path(os.path.expanduser(args.input_dir))
-    output_dir = Path(os.path.expanduser(args.output_dir))
-    output_dir.mkdir(parents=True, exist_ok=True)
-
+    input_path = Path(os.path.expanduser(args.input_file))
+    output_path = Path(os.path.expanduser(args.output_file))
+    split = args.split or output_path.stem
     system_prompt = _resolve_system_prompt(args)
 
-    _write_split(
-        input_dir=input_dir,
-        output_dir=output_dir,
-        split_name="train",
-        output_name="train.parquet",
+    _write_file(
+        input_path=input_path,
+        output_path=output_path,
         data_source=args.data_source,
         ability=args.ability,
         system_prompt=system_prompt,
         negative_prompt=args.negative_prompt,
-    )
-    _write_split(
-        input_dir=input_dir,
-        output_dir=output_dir,
-        split_name="test",
-        output_name="test.parquet",
-        data_source=args.data_source,
-        ability=args.ability,
-        system_prompt=system_prompt,
-        negative_prompt=args.negative_prompt,
+        split=split,
     )
 
     if args.hdfs_dir is not None:
         from verl.utils.hdfs_io import copy, makedirs
 
         makedirs(args.hdfs_dir)
-        copy(src=str(output_dir), dst=args.hdfs_dir)
+        copy(src=str(output_path), dst=args.hdfs_dir)
 
 
 if __name__ == "__main__":

@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Generate offline DPO triples from prompts using a frozen reference pipeline.
+"""Generate offline DPO triples from one prompt file using a frozen reference pipeline.
 
 The output schema is one logical preference pair per row:
 
@@ -117,13 +117,17 @@ def _make_generator(seed: int, device: str) -> torch.Generator:
 async def _generate_split(args: argparse.Namespace, split: str) -> Path:
     from diffusers import StableDiffusion3Pipeline
 
-    input_path = Path(os.path.expanduser(args.input_dir)) / f"{split}{args.input_suffix}"
+    input_path = Path(os.path.expanduser(args.input_file))
+    output_path = Path(os.path.expanduser(args.output_file))
     prompts = _read_prompts(input_path, args.prompt_key)
     if args.max_samples > 0:
         prompts = prompts[: args.max_samples]
 
-    output_dir = Path(os.path.expanduser(args.output_dir))
-    image_dir = output_dir / "images" / split
+    if args.image_dir is None:
+        image_dir = output_path.parent / "images" / output_path.stem
+    else:
+        image_dir = Path(os.path.expanduser(args.image_dir))
+    output_path.parent.mkdir(parents=True, exist_ok=True)
     image_dir.mkdir(parents=True, exist_ok=True)
 
     dtype = {"float16": torch.float16, "bfloat16": torch.bfloat16, "float32": torch.float32}[args.dtype]
@@ -160,8 +164,8 @@ async def _generate_split(args: argparse.Namespace, split: str) -> Path:
                 "data_source": args.data_source,
                 "prompt": _build_messages(prompt, args.system_prompt),
                 "negative_prompt": _build_messages(args.negative_prompt, args.system_prompt),
-                "img_win": os.path.relpath(win["path"], output_dir),
-                "img_lose": os.path.relpath(lose["path"], output_dir),
+                "img_win": os.path.relpath(win["path"], output_path.parent),
+                "img_lose": os.path.relpath(lose["path"], output_path.parent),
                 "win_score": win["score"],
                 "lose_score": lose["score"],
                 "reward_model": {"style": "model", "ground_truth": prompt},
@@ -178,7 +182,6 @@ async def _generate_split(args: argparse.Namespace, split: str) -> Path:
             }
         )
 
-    output_path = output_dir / f"{split}.parquet"
     pd.DataFrame(rows).to_parquet(output_path)
     print(f"Wrote {len(rows)} offline DPO pairs to {output_path}")
     return output_path
@@ -186,9 +189,9 @@ async def _generate_split(args: argparse.Namespace, split: str) -> Path:
 
 def main():
     parser = argparse.ArgumentParser(description="Generate offline DPO triples with a frozen diffusion model.")
-    parser.add_argument("--input_dir", required=True, help="Directory containing train/test prompt files.")
-    parser.add_argument("--output_dir", required=True, help="Directory for images and parquet output.")
-    parser.add_argument("--input_suffix", default=".txt", help="Split file suffix, e.g. .txt or .parquet.")
+    parser.add_argument("--input_file", required=True, help="Prompt file. Supports .txt, .json, .jsonl and parquet.")
+    parser.add_argument("--output_file", required=True, help="Parquet file to write.")
+    parser.add_argument("--image_dir", default=None, help="Directory to write generated images.")
     parser.add_argument("--prompt_key", default="prompt", help="Prompt column for parquet/json inputs.")
     parser.add_argument("--model_path", default="stabilityai/stable-diffusion-3.5-medium")
     parser.add_argument("--data_source", default="offline_dpo")
@@ -209,6 +212,7 @@ def main():
     parser.add_argument("--reward_router_address", default=None)
     parser.add_argument("--reward_model_name", default=None)
     parser.add_argument("--disable_progress", action="store_true")
+    parser.add_argument("--split", default=None, help="Optional split name stored in extra_info.split.")
     args = parser.parse_args()
 
     if args.num_images_per_prompt < 2:
@@ -216,12 +220,9 @@ def main():
     if (args.reward_function_path is None) != (args.reward_function_name is None):
         raise ValueError("Set both --reward_function_path and --reward_function_name, or neither.")
 
-    output_dir = Path(os.path.expanduser(args.output_dir))
-    output_dir.mkdir(parents=True, exist_ok=True)
-    asyncio.run(_generate_split(args, "train"))
-    test_path = Path(os.path.expanduser(args.input_dir)) / f"test{args.input_suffix}"
-    if test_path.exists():
-        asyncio.run(_generate_split(args, "test"))
+    output_path = Path(os.path.expanduser(args.output_file))
+    split = args.split or output_path.stem
+    asyncio.run(_generate_split(args, split))
 
 
 if __name__ == "__main__":

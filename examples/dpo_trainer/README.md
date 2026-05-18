@@ -12,19 +12,26 @@ This example supports two DPO data paths:
 
 ## Online-DPO Prompt Data
 
-Create UTF-8 text files with one prompt per line:
+Create UTF-8 text files with one prompt per line. File names are arbitrary:
 
 ```text
-dataset/my_prompts/train.txt
-dataset/my_prompts/test.txt
+dataset/my_prompts/train_prompts.txt
+dataset/my_prompts/eval_prompts.txt
 ```
 
 Convert them to parquet:
 
 ```bash
 python3 examples/dpo_trainer/data_process/prepare_online_dpo.py \
-  --input_dir dataset/my_prompts \
-  --output_dir data/my_prompts \
+  --input_file dataset/my_prompts/train_prompts.txt \
+  --output_file data/my_prompts/train.parquet \
+  --data_source prompt_image_reward \
+  --system_prompt "You are a helpful image generation assistant."
+
+python3 examples/dpo_trainer/data_process/prepare_online_dpo.py \
+  --input_file dataset/my_prompts/eval_prompts.txt \
+  --output_file data/my_prompts/test.parquet \
+  --split test \
   --data_source prompt_image_reward \
   --system_prompt "You are a helpful image generation assistant."
 ```
@@ -58,12 +65,30 @@ pre-ranked pair per prompt. The resulting parquet rows contain:
 - `win_score` and `lose_score`: reward scores used to order the pair.
 - `extra_info.raw_prompt`: plain prompt text for traceability.
 
-Generate offline pairs from `train.txt` and optional `test.txt`:
+Generate offline pairs from any prompt file and choose the parquet output path
+explicitly:
 
 ```bash
 python3 examples/dpo_trainer/data_process/prepare_offline_dpo.py \
-  --input_dir dataset/my_prompts \
-  --output_dir data/offline_dpo \
+  --input_file dataset/my_prompts/train_prompts.txt \
+  --output_file data/offline_dpo/train.parquet \
+  --image_dir data/offline_dpo/images/train \
+  --model_path stabilityai/stable-diffusion-3.5-medium \
+  --num_images_per_prompt 4 \
+  --height 256 \
+  --width 256 \
+  --num_inference_steps 25 \
+  --guidance_scale 4.0 \
+  --reward_function_path verl_omni/utils/reward_score/unified_reward.py \
+  --reward_function_name compute_score_unified_reward \
+  --reward_router_address 127.0.0.1:8000 \
+  --reward_model_name CodeGoat24/UnifiedReward-2.0-qwen3vl-8b
+
+python3 examples/dpo_trainer/data_process/prepare_offline_dpo.py \
+  --input_file dataset/my_prompts/eval_prompts.txt \
+  --output_file data/offline_dpo/test.parquet \
+  --image_dir data/offline_dpo/images/test \
+  --split test \
   --model_path stabilityai/stable-diffusion-3.5-medium \
   --num_images_per_prompt 4 \
   --height 256 \
@@ -79,8 +104,8 @@ python3 examples/dpo_trainer/data_process/prepare_offline_dpo.py \
 This writes:
 
 - `data/offline_dpo/train.parquet`
-- `data/offline_dpo/test.parquet`, if `dataset/my_prompts/test.txt` exists
-- generated images under `data/offline_dpo/images/`
+- `data/offline_dpo/test.parquet`
+- generated images under the requested `--image_dir`
 
 Train on the offline triples with:
 
