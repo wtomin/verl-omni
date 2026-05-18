@@ -26,6 +26,12 @@ import argparse
 import asyncio
 import importlib.util
 import os
+import shlex
+import subprocess
+import time
+import urllib.error
+import urllib.request
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -35,6 +41,7 @@ import torch
 from PIL import Image
 
 DEFAULT_SYSTEM_PROMPT = "You are a helpful image generation assistant."
+DEFAULT_REWARD_SERVER_COMMAND = "vllm serve {model} --host {host} --port {port}"
 
 
 def _read_prompts_from_txt(path: Path) -> list[str]:
@@ -112,6 +119,55 @@ async def _score_image(reward_fn, image: Image.Image, prompt: str, args: argpars
 def _make_generator(seed: int, device: str) -> torch.Generator:
     generator_device = device if device != "cpu" else "cpu"
     return torch.Generator(device=generator_device).manual_seed(seed)
+
+
+def _router_url(host: str, port: int, path: str) -> str:
+    return f"http://{host}:{port}{path}"
+
+
+def _wait_for_reward_server(host: str, port: int, timeout_s: int) -> None:
+    deadline = time.time() + timeout_s
+    url = _router_url(host, port, "/v1/models")
+    last_error: Exception | None = None
+    while time.time() < deadline:
+        try:
+            with urllib.request.urlopen(url, timeout=5) as response:
+                if 200 <= response.status < 500:
+                    return
+        except (OSError, urllib.error.URLError) as exc:
+            last_error = exc
+        time.sleep(5)
+    raise TimeoutError(f"Reward server did not become ready at {url} within {timeout_s}s: {last_error}")
+
+
+@contextmanager
+def _maybe_launch_reward_server(args: argparse.Namespace):
+    if not args.launch_reward_server:
+        yield
+        return
+
+    if args.reward_model_name is None:
+        raise ValueError("--launch_reward_server requires --reward_model_name.")
+
+    command = args.reward_server_command.format(
+        model=args.reward_model_name,
+        host=args.reward_server_host,
+        port=args.reward_server_port,
+    )
+    print(f"Launching reward server: {command}")
+    process = subprocess.Popen(shlex.split(command))
+    try:
+        _wait_for_reward_server(args.reward_server_host, args.reward_server_port, args.reward_server_startup_timeout)
+        print(f"Reward server is ready at {args.reward_router_address}")
+        yield
+    finally:
+        print("Stopping reward server.")
+        process.terminate()
+        try:
+            process.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
 
 
 async def _generate_split(args: argparse.Namespace, split: str) -> Path:
@@ -211,6 +267,22 @@ def main():
     parser.add_argument("--reward_function_name", default=None)
     parser.add_argument("--reward_router_address", default=None)
     parser.add_argument("--reward_model_name", default=None)
+    parser.add_argument(
+        "--launch_reward_server",
+        action="store_true",
+        help="Launch an OpenAI-compatible reward server subprocess before scoring.",
+    )
+    parser.add_argument("--reward_server_host", default="127.0.0.1")
+    parser.add_argument("--reward_server_port", type=int, default=8000)
+    parser.add_argument(
+        "--reward_server_command",
+        default=DEFAULT_REWARD_SERVER_COMMAND,
+        help=(
+            "Command template used with --launch_reward_server. "
+            "Available placeholders: {model}, {host}, {port}."
+        ),
+    )
+    parser.add_argument("--reward_server_startup_timeout", type=int, default=900)
     parser.add_argument("--disable_progress", action="store_true")
     parser.add_argument("--split", default=None, help="Optional split name stored in extra_info.split.")
     args = parser.parse_args()
@@ -219,10 +291,18 @@ def main():
         raise ValueError("--num_images_per_prompt must be at least 2 for DPO pair construction.")
     if (args.reward_function_path is None) != (args.reward_function_name is None):
         raise ValueError("Set both --reward_function_path and --reward_function_name, or neither.")
+    if args.launch_reward_server and args.reward_router_address is None:
+        args.reward_router_address = f"{args.reward_server_host}:{args.reward_server_port}"
+    if args.reward_function_path is not None and args.reward_router_address is None:
+        raise ValueError(
+            "Reward scoring requires --reward_router_address, or use --launch_reward_server "
+            "to start one automatically."
+        )
 
     output_path = Path(os.path.expanduser(args.output_file))
     split = args.split or output_path.stem
-    asyncio.run(_generate_split(args, split))
+    with _maybe_launch_reward_server(args):
+        asyncio.run(_generate_split(args, split))
 
 
 if __name__ == "__main__":

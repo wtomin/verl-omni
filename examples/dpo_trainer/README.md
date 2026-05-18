@@ -81,7 +81,9 @@ python3 examples/dpo_trainer/data_process/prepare_offline_dpo.py \
   --guidance_scale 4.0 \
   --reward_function_path verl_omni/utils/reward_score/unified_reward.py \
   --reward_function_name compute_score_unified_reward \
-  --reward_router_address 127.0.0.1:8000 \
+  --launch_reward_server \
+  --reward_server_host 127.0.0.1 \
+  --reward_server_port 8000 \
   --reward_model_name CodeGoat24/UnifiedReward-2.0-qwen3vl-8b
 
 python3 examples/dpo_trainer/data_process/prepare_offline_dpo.py \
@@ -97,9 +99,18 @@ python3 examples/dpo_trainer/data_process/prepare_offline_dpo.py \
   --guidance_scale 4.0 \
   --reward_function_path verl_omni/utils/reward_score/unified_reward.py \
   --reward_function_name compute_score_unified_reward \
-  --reward_router_address 127.0.0.1:8000 \
+  --launch_reward_server \
+  --reward_server_host 127.0.0.1 \
+  --reward_server_port 8000 \
   --reward_model_name CodeGoat24/UnifiedReward-2.0-qwen3vl-8b
 ```
+
+`--launch_reward_server` starts a `vllm serve` subprocess with the reward model
+and waits for `/v1/models` before scoring. If you already have an
+OpenAI-compatible reward server running, omit `--launch_reward_server` and pass
+`--reward_router_address host:port` instead. For custom vLLM flags, override
+`--reward_server_command`; the template can use `{model}`, `{host}` and
+`{port}`.
 
 This writes:
 
