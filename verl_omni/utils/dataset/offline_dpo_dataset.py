@@ -68,6 +68,50 @@ def _message_content_to_text(content: Any) -> str:
     return "" if content is None else str(content)
 
 
+def _coerce_extra_info(extra_info: Any) -> dict[str, Any]:
+    if isinstance(extra_info, dict):
+        return extra_info
+    if extra_info is None:
+        return {}
+    return {"raw_extra_info": extra_info}
+
+
+def _plain_text_from_extra_info(extra_info: dict[str, Any], key: str) -> str | None:
+    """Return non-empty plain text from ``extra_info[key]`` when present."""
+    if key not in extra_info:
+        return None
+    value = extra_info[key]
+    if value is None:
+        return None
+    if isinstance(value, str):
+        text = value.strip()
+        return text if text else None
+    text = str(value).strip()
+    return text if text else None
+
+
+def resolve_materialize_prompts(
+    prompt: Any,
+    negative_prompt: Any,
+    extra_info: Any,
+) -> tuple[str, str]:
+    """Resolve plain prompts for SD3 materialization.
+
+    Prefer ``extra_info["raw_prompt"]`` and ``extra_info["raw_negative_prompt"]``
+    (written by ``prepare_offline_dpo``). Fall back to parsing chat-style
+    ``prompt`` / ``negative_prompt`` columns when extra_info text is missing.
+    """
+    info = _coerce_extra_info(extra_info)
+    raw_prompt = _plain_text_from_extra_info(info, "raw_prompt")
+    if raw_prompt is None:
+        raw_prompt = prompt_to_text(prompt)
+
+    raw_negative_prompt = _plain_text_from_extra_info(info, "raw_negative_prompt")
+    if raw_negative_prompt is None:
+        raw_negative_prompt = prompt_to_text(negative_prompt)
+    return raw_prompt, raw_negative_prompt
+
+
 def prompt_to_text(prompt: Any) -> str:
     """Extract plain caption text for diffusion text encoders and reward metadata."""
     if isinstance(prompt, str):
@@ -163,11 +207,12 @@ class OfflineDPODataset(Dataset):
         if win_score < lose_score:
             raise ValueError(f"Offline DPO row {item} has win_score < lose_score: {win_score} < {lose_score}")
 
-        raw_prompt = prompt_to_text(prompt)
-        raw_negative_prompt = prompt_to_text(negative_prompt)
-        extra_info = row.get("extra_info") or {}
-        if not isinstance(extra_info, dict):
-            extra_info = {"raw_extra_info": extra_info}
+        extra_info = _coerce_extra_info(row.get("extra_info"))
+        raw_prompt, raw_negative_prompt = resolve_materialize_prompts(
+            prompt=prompt,
+            negative_prompt=negative_prompt,
+            extra_info=extra_info,
+        )
         extra_info = {
             **extra_info,
             "index": int(item),
