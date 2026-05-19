@@ -16,7 +16,11 @@ import pandas as pd
 import torch
 from omegaconf import OmegaConf
 
-from verl_omni.utils.dataset.offline_dpo_dataset import OfflineDPODataset, expand_offline_dpo_features
+from verl_omni.utils.dataset.offline_dpo_dataset import (
+    OfflineDPODataset,
+    expand_offline_dpo_features,
+    resolve_materialize_prompts,
+)
 from verl_omni.utils.dataset.rl_dataset import collate_fn
 
 
@@ -74,6 +78,47 @@ def test_offline_dpo_dataset_expands_adjacent_win_lose_pairs(tmp_path) -> None:
     assert features[0]["sample_level_scores"].item() > features[1]["sample_level_scores"].item()
     assert features[0]["image_path"].endswith("win.png")
     assert features[1]["image_path"].endswith("lose.png")
+
+
+def test_prefers_extra_info_raw_prompt_for_materialize(tmp_path) -> None:
+    data_path = tmp_path / "train.parquet"
+    chat_like_prompt = (
+        "[{'role': 'system', 'content': 'You are a helpful image generation assistant.'}\n"
+        " {'role': 'user', 'content': 'wrong caption from prompt column'}]"
+    )
+    pd.DataFrame(
+        [
+            {
+                "prompt": chat_like_prompt,
+                "negative_prompt": [{"role": "user", "content": "neg from column"}],
+                "img_win": "win.png",
+                "img_lose": "lose.png",
+                "win_score": 0.9,
+                "lose_score": 0.1,
+                "extra_info": {
+                    "raw_prompt": "gold tip pyramid in the night",
+                    "raw_negative_prompt": " ",
+                },
+            }
+        ]
+    ).to_parquet(data_path)
+
+    dataset = OfflineDPODataset(str(data_path), _ToyTokenizer(), config=_config())
+    item = dataset[0]
+
+    assert item["prompt_text"] == "gold tip pyramid in the night"
+    assert item["negative_prompt_text"] == " "
+    features = expand_offline_dpo_features([item])
+    assert features[0]["raw_prompt"] == "gold tip pyramid in the night"
+    assert features[1]["raw_negative_prompt"] == " "
+
+    raw_prompt, raw_negative = resolve_materialize_prompts(
+        chat_like_prompt,
+        [{"role": "user", "content": "neg from column"}],
+        {"raw_prompt": "caption from extra_info", "raw_negative_prompt": "neg from extra"},
+    )
+    assert raw_prompt == "caption from extra_info"
+    assert raw_negative == "neg from extra"
 
 
 def test_rl_collate_expands_offline_dpo_pairs(tmp_path) -> None:
