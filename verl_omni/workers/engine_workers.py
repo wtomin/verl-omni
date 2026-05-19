@@ -429,6 +429,19 @@ class TrainingWorker(Worker, DistProfilerExtension):
 
         return final_output
 
+    def materialize_dpo_flow_batch(self, data: TensorDict) -> TensorDict | None:
+        """Populate ``dpo_*`` flow-matching tensors in-place for aligned policy/ref DPO."""
+        materializer = getattr(self.engine, "materialize_dpo_flow_batch", None)
+        if materializer is None:
+            raise NotImplementedError(
+                f"{type(self.engine).__name__} does not implement materialize_dpo_flow_batch; "
+                "use model_type=diffusion_dpo_model for DPO training."
+            )
+        materializer(data)
+        if self.engine.is_mp_src_rank_with_outputs():
+            return data.select("dpo_noise", "dpo_timesteps").cpu()
+        return None
+
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def save_checkpoint(self, local_path, hdfs_path=None, global_step=0, max_ckpt_to_keep=None):
         return self.engine.save_checkpoint(local_path, hdfs_path, global_step, max_ckpt_to_keep)
@@ -679,6 +692,36 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         output = self.actor.infer_batch(data)
 
         return output.cpu() if output is not None else None
+
+    @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))
+    @DistProfiler.annotate(color="blue", role="materialize_dpo_flow_batch")
+    @_with_routing_replay_flag(enabled=False)
+    def materialize_dpo_flow_batch(self, data: TensorDict) -> TensorDict:
+        return self.actor.materialize_dpo_flow_batch(data)
+
+    @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="ref"))
+    @DistProfiler.annotate(color="olive", role="dpo_ref_noise_pred")
+    @_with_routing_replay_flag(enabled=False)
+    def compute_dpo_ref_noise_pred(self, data: TensorDict) -> TensorDict:
+        output = self.ref.infer_batch(data=data)
+        if output is None:
+            return None
+        noise_pred = tu.get(output, "noise_pred")
+        if noise_pred.ndim >= 2 and noise_pred.shape[1] == 1:
+            noise_pred = noise_pred[:, 0]
+        return tu.get_tensordict({"ref_noise_pred": noise_pred.float()}).cpu()
+
+    @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))
+    @DistProfiler.annotate(color="olive", role="dpo_ref_noise_pred_actor_base")
+    @_with_routing_replay_flag(enabled=True)
+    def compute_dpo_ref_noise_pred_via_actor_base(self, data: TensorDict) -> TensorDict:
+        output = self.actor.infer_batch(data=data)
+        if output is None:
+            return None
+        noise_pred = tu.get(output, "noise_pred")
+        if noise_pred.ndim >= 2 and noise_pred.shape[1] == 1:
+            noise_pred = noise_pred[:, 0]
+        return tu.get_tensordict({"ref_noise_pred": noise_pred.float()}).cpu()
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))
     @DistProfiler.annotate(color="red", role="actor_update")
