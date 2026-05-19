@@ -12,23 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Diffusion-specific algorithm config additions for verl_omni."""
+from .diffusers_training_adapter import StableDiffusion3DPO
 
-from dataclasses import dataclass
-
-from verl.base_config import BaseConfig
-
-__all__ = ["DiffusionAlgoConfig"]
-
-
-@dataclass
-class DiffusionAlgoConfig(BaseConfig):
-    """Diffusion-specific algorithm config."""
-
-    trainer_type: str = "policy_gradient"
-    sample_source: str = "online"
-    adv_estimator: str = "flow_grpo"
-    norm_adv_by_std_in_grpo: bool = True
-    bypass_mode: bool = False
-    global_std: bool = True
-    dpo_mode: str = "offline"
+__all__ = ["StableDiffusion3DPO"]
