@@ -675,8 +675,7 @@ class PPODiffusersFSDPEngine(DiffusersFSDPEngine):
     def forward_backward_batch(
         self, data: TensorDict, loss_function: Callable, forward_only: bool = False
     ) -> list[TensorDict]:
-        is_dpo = self.model_config.algorithm == "dpo"
-        num_timesteps = 1 if is_dpo else data["all_timesteps"].shape[1]
+        num_timesteps = data["all_timesteps"].shape[1]
         tu.assign_non_tensor(data, sp_size=self.ulysses_sequence_parallel_size)
         tu.assign_non_tensor(data, use_dynamic_bsz=False)
 
@@ -694,29 +693,18 @@ class PPODiffusersFSDPEngine(DiffusersFSDPEngine):
             micro_batch = micro_batch.to(get_device_id())
             tu.assign_non_tensor(micro_batch, gradient_accumulation_steps=gradient_accumulation_steps)
             meta_info_lst = {"model_output": [], "loss": [], "metrics": []}
+            # Forward and backward for each timestep
             with ctx:
-                if is_dpo:
-                    # DPO is a one-shot flow-matching objective over final image latents,
-                    # not a reversed-sampling objective over every rollout timestep.
+                for step in range(num_timesteps):
                     loss, meta_info = self.forward_step(
-                        micro_batch,
-                        loss_function=loss_function,
-                        forward_only=forward_only,
-                        step=None,  # use random step for DPO
+                        micro_batch, loss_function=loss_function, forward_only=forward_only, step=step
                     )
 
-                else:
-                    # Forward and backward for each timestep
-                    for step in range(num_timesteps):
-                        loss, meta_info = self.forward_step(
-                            micro_batch, loss_function=loss_function, forward_only=forward_only, step=step
-                        )
+                    if not forward_only:
+                        loss.backward()
 
-                if not forward_only:
-                    loss.backward()
-
-                for key, val in meta_info.items():
-                    meta_info_lst[key].append(val)
+                    for key, val in meta_info.items():
+                        meta_info_lst[key].append(val)
 
             output_lst.append(meta_info_lst)
 
@@ -759,47 +747,41 @@ class PPODiffusersFSDPEngine(DiffusersFSDPEngine):
         return output
 
     @staticmethod
-    def _unpad_nested_embeds(embeds: torch.Tensor, mask: torch.Tensor | None) -> tuple[torch.Tensor, torch.Tensor | None]:
-        """Convert jagged nested embeds, and an optional nested mask, to dense padded tensors."""
+    def _unpad_nested_embeds(embeds: torch.Tensor, mask: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Convert a jagged nested tensor pair (embeds, mask) to dense padded tensors."""
         batch_size = embeds.size(0)
         max_seq_len = max(embeds.offsets().diff())
         embed_dim = embeds.size(-1)
         embeds = torch.nested.to_padded_tensor(embeds, padding=0, output_size=(batch_size, max_seq_len, embed_dim))
-        if mask is None:
-            return embeds, None
-        if mask.is_nested:
-            mask = torch.nested.to_padded_tensor(mask, padding=0, output_size=(batch_size, max_seq_len))
+        mask = torch.nested.to_padded_tensor(mask, padding=0, output_size=(batch_size, max_seq_len))
         return embeds, mask
 
     @staticmethod
-    def _pad_embeds_for_sp(
-        embeds: torch.Tensor, mask: torch.Tensor | None, sp_size: int
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+    def _pad_embeds_for_sp(embeds: torch.Tensor, mask: torch.Tensor, sp_size: int) -> tuple[torch.Tensor, torch.Tensor]:
         """Pad sequence dimension of (embeds, mask) to a multiple of sp_size."""
         seq_len = embeds.size(1)
         aligned_seq_len = (seq_len + sp_size - 1) // sp_size * sp_size
         if aligned_seq_len > seq_len:
             pad_len = aligned_seq_len - seq_len
             embeds = torch.nn.functional.pad(embeds, (0, 0, 0, pad_len))
-            if mask is not None:
-                mask = torch.nn.functional.pad(mask, (0, pad_len))
+            mask = torch.nn.functional.pad(mask, (0, pad_len))
         return embeds, mask
 
-    def _prepare_prompt_embeds(
-        self,
-        prompt_embeds: torch.Tensor,
-        prompt_embeds_mask: torch.Tensor | None,
-        negative_prompt_embeds: torch.Tensor | None,
-        negative_prompt_embeds_mask: torch.Tensor | None,
-    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
-        """Apply common nested-tensor and sequence-parallel padding to prompt embeds."""
+    def prepare_model_inputs(self, micro_batch: TensorDict, step: int):
+        """
+        Extract and pre-process universal tensors, then delegate architecture-specific
+        input construction to the registered DiffusionModelBase subclass.
+
+        Handles common tensor extraction and nested-embed unpadding here.
+        Architecture-specific input dict construction is delegated to the model registry.
+        """
+        latents = micro_batch["all_latents"]
+        timesteps = micro_batch["all_timesteps"]
+        prompt_embeds = micro_batch["prompt_embeds"]
+        prompt_embeds_mask = micro_batch["prompt_embeds_mask"]
+        negative_prompt_embeds = micro_batch["negative_prompt_embeds"]
+        negative_prompt_embeds_mask = micro_batch["negative_prompt_embeds_mask"]
         sp_size = self.ulysses_sequence_parallel_size if self.use_ulysses_sp else 1
-        if not isinstance(prompt_embeds_mask, torch.Tensor):
-            prompt_embeds_mask = None
-        if not isinstance(negative_prompt_embeds, torch.Tensor):
-            negative_prompt_embeds = None
-        if not isinstance(negative_prompt_embeds_mask, torch.Tensor):
-            negative_prompt_embeds_mask = None
 
         if prompt_embeds.is_nested:
             prompt_embeds, prompt_embeds_mask = self._unpad_nested_embeds(prompt_embeds, prompt_embeds_mask)
@@ -816,31 +798,6 @@ class PPODiffusersFSDPEngine(DiffusersFSDPEngine):
             negative_prompt_embeds, negative_prompt_embeds_mask = self._pad_embeds_for_sp(
                 negative_prompt_embeds, negative_prompt_embeds_mask, sp_size
             )
-
-        return prompt_embeds, prompt_embeds_mask, negative_prompt_embeds, negative_prompt_embeds_mask
-
-    def prepare_model_inputs(self, micro_batch: TensorDict, step: int):
-        """
-        Extract and pre-process universal tensors, then delegate architecture-specific
-        input construction to the registered DiffusionModelBase subclass.
-
-        Handles common tensor extraction and nested-embed unpadding here.
-        Architecture-specific input dict construction is delegated to the model registry.
-        """
-        latents = micro_batch["all_latents"]
-        timesteps = micro_batch["all_timesteps"]
-        prompt_embeds = micro_batch["prompt_embeds"]
-        prompt_embeds_mask = micro_batch["prompt_embeds_mask"]
-        negative_prompt_embeds = micro_batch["negative_prompt_embeds"]
-        negative_prompt_embeds_mask = micro_batch["negative_prompt_embeds_mask"]
-        prompt_embeds, prompt_embeds_mask, negative_prompt_embeds, negative_prompt_embeds_mask = (
-            self._prepare_prompt_embeds(
-                prompt_embeds=prompt_embeds,
-                prompt_embeds_mask=prompt_embeds_mask,
-                negative_prompt_embeds=negative_prompt_embeds,
-                negative_prompt_embeds_mask=negative_prompt_embeds_mask,
-            )
-        )
 
         return prepare_model_inputs(
             module=self.module,
@@ -964,6 +921,69 @@ class DPODiffusersFSDPEngine(DiffusersFSDPEngine):
         data["dpo_noise"] = noise
         data["dpo_timesteps"] = timesteps
 
+    @staticmethod
+    def _unpad_nested_embeds(
+        embeds: torch.Tensor, mask: torch.Tensor | None
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """Convert jagged nested embeds, and an optional nested mask, to dense padded tensors."""
+        batch_size = embeds.size(0)
+        max_seq_len = max(embeds.offsets().diff())
+        embed_dim = embeds.size(-1)
+        embeds = torch.nested.to_padded_tensor(embeds, padding=0, output_size=(batch_size, max_seq_len, embed_dim))
+        if mask is None:
+            return embeds, None
+        if mask.is_nested:
+            mask = torch.nested.to_padded_tensor(mask, padding=0, output_size=(batch_size, max_seq_len))
+        return embeds, mask
+
+    @staticmethod
+    def _pad_embeds_for_sp(
+        embeds: torch.Tensor, mask: torch.Tensor | None, sp_size: int
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """Pad sequence dimension of (embeds, mask) to a multiple of sp_size."""
+        seq_len = embeds.size(1)
+        aligned_seq_len = (seq_len + sp_size - 1) // sp_size * sp_size
+        if aligned_seq_len > seq_len:
+            pad_len = aligned_seq_len - seq_len
+            embeds = torch.nn.functional.pad(embeds, (0, 0, 0, pad_len))
+            if mask is not None:
+                mask = torch.nn.functional.pad(mask, (0, pad_len))
+        return embeds, mask
+
+    def _prepare_prompt_embeds(
+        self,
+        prompt_embeds: torch.Tensor,
+        prompt_embeds_mask: torch.Tensor | None,
+        negative_prompt_embeds: torch.Tensor | None,
+        negative_prompt_embeds_mask: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
+        """Apply common nested-tensor and sequence-parallel padding to prompt embeds."""
+        sp_size = self.ulysses_sequence_parallel_size if self.use_ulysses_sp else 1
+        if not isinstance(prompt_embeds_mask, torch.Tensor):
+            prompt_embeds_mask = None
+        if not isinstance(negative_prompt_embeds, torch.Tensor):
+            negative_prompt_embeds = None
+        if not isinstance(negative_prompt_embeds_mask, torch.Tensor):
+            negative_prompt_embeds_mask = None
+
+        if prompt_embeds.is_nested:
+            prompt_embeds, prompt_embeds_mask = self._unpad_nested_embeds(prompt_embeds, prompt_embeds_mask)
+
+        if sp_size > 1:
+            prompt_embeds, prompt_embeds_mask = self._pad_embeds_for_sp(prompt_embeds, prompt_embeds_mask, sp_size)
+
+        if isinstance(negative_prompt_embeds, torch.Tensor) and negative_prompt_embeds.is_nested:
+            negative_prompt_embeds, negative_prompt_embeds_mask = self._unpad_nested_embeds(
+                negative_prompt_embeds, negative_prompt_embeds_mask
+            )
+
+        if isinstance(negative_prompt_embeds, torch.Tensor) and sp_size > 1:
+            negative_prompt_embeds, negative_prompt_embeds_mask = self._pad_embeds_for_sp(
+                negative_prompt_embeds, negative_prompt_embeds_mask, sp_size
+            )
+
+        return prompt_embeds, prompt_embeds_mask, negative_prompt_embeds, negative_prompt_embeds_mask
+
     def prepare_model_inputs(self, micro_batch: TensorDict, step: int):
         del step
 
@@ -1014,6 +1034,47 @@ class DPODiffusersFSDPEngine(DiffusersFSDPEngine):
             "timesteps": dpo_context["timesteps"],
         }
 
+    def forward_backward_batch(
+        self, data: TensorDict, loss_function: Callable, forward_only: bool = False
+    ) -> list[TensorDict]:
+        tu.assign_non_tensor(data, sp_size=self.ulysses_sequence_parallel_size)
+        tu.assign_non_tensor(data, use_dynamic_bsz=False)
+
+        micro_batches, indices = prepare_micro_batches(
+            data=data, dp_group=self.get_data_parallel_group(), same_micro_num_in_dp=True
+        )
+
+        gradient_accumulation_steps = len(micro_batches)
+
+        output_lst = []
+
+        ctx = torch.no_grad() if forward_only else nullcontext()
+
+        for micro_batch in micro_batches:
+            micro_batch = micro_batch.to(get_device_id())
+            tu.assign_non_tensor(micro_batch, gradient_accumulation_steps=gradient_accumulation_steps)
+            meta_info_lst = {"model_output": [], "loss": [], "metrics": []}
+            with ctx:
+                # DPO is a one-shot flow-matching objective over final image latents,
+                # not a reversed-sampling objective over every rollout timestep.
+                loss, meta_info = self.forward_step(
+                    micro_batch,
+                    loss_function=loss_function,
+                    forward_only=forward_only,
+                    step=None,  # use random step for DPO
+                )
+
+                if not forward_only:
+                    loss.backward()
+
+                for key, val in meta_info.items():
+                    meta_info_lst[key].append(val)
+
+            output_lst.append(meta_info_lst)
+
+        # postprocess and return
+        return self.postprocess_batch_func(output_lst=output_lst, indices=indices, data=data)
+
     def forward_step(self, micro_batch: TensorDict, loss_function, forward_only, step):
         model_inputs, negative_model_inputs, dpo_context = self.prepare_model_inputs(micro_batch=micro_batch, step=step)
         noise_pred = forward_and_sample_previous_step(
@@ -1028,7 +1089,7 @@ class DPODiffusersFSDPEngine(DiffusersFSDPEngine):
         model_output = self.prepare_model_outputs(output=(noise_pred, dpo_context), micro_batch=micro_batch)
 
         if loss_function is not None:
-            data = tu.get_tensordict({"sample_level_scores": micro_batch["sample_level_scores"]})
+            data = tu.get_tensordict({"sample_level_rewards": micro_batch["sample_level_rewards"]})
             uid = tu.get_non_tensor_data(micro_batch, "uid", default=None)
             tu.assign_non_tensor(
                 data,
