@@ -22,17 +22,6 @@ import torch
 from verl import DataProto
 
 
-def _compute_sequence_reward(batch: DataProto) -> torch.Tensor:
-    if "sample_level_rewards" in batch.batch:
-        rewards = batch.batch["sample_level_rewards"]
-    elif "sample_level_scores" in batch.batch:
-        rewards = batch.batch["sample_level_scores"]
-    else:
-        raise KeyError("Diffusion metrics require `sample_level_rewards` or `sample_level_scores`.")
-
-    return rewards.mean(dim=1) if rewards.ndim > 1 else rewards
-
-
 def compute_data_metrics_diffusion(batch: DataProto) -> dict[str, Any]:
     """
     Computes various metrics from a diffusion training batch.
