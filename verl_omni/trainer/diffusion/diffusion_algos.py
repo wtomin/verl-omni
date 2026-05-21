@@ -13,6 +13,7 @@
 # limitations under the License.
 """Diffusion-specific loss functions and KL penalties."""
 
+from abc import ABC, abstractmethod
 from collections import defaultdict
 from dataclasses import dataclass
 from enum import Enum
@@ -44,8 +45,8 @@ def _format_available_keys(mapping: Any) -> str:
     return "[" + ", ".join(keys) + "]"
 
 
-class DiffusionLossFn:
-    """Base class for worker-side diffusion loss functions."""
+class DiffusionLossFn(ABC):
+    """Abstract base for worker-side diffusion loss functions."""
 
     # Keys that must be present in ``model_output`` (tensors from the actor
     # forward pass, e.g. ``log_probs``). Subclasses override this so
@@ -80,6 +81,7 @@ class DiffusionLossFn:
             details.append(f"Available data keys: {_format_available_keys(data)}.")
         raise KeyError(" ".join(details))
 
+    @abstractmethod
     def __call__(
         self,
         *,
@@ -87,7 +89,7 @@ class DiffusionLossFn:
         model_output: dict[str, Any],
         data: TensorDict,
     ) -> DiffusionLossResult:
-        raise NotImplementedError
+        """Compute loss and metrics from the worker batch."""
 
 
 DIFFUSION_LOSS_REGISTRY: dict[str, DiffusionLossFn] = {}
