@@ -17,12 +17,16 @@ from omegaconf import DictConfig
 from verl.trainer.main_ppo import create_rl_dataset as _upstream_create_rl_dataset
 from verl.trainer.main_ppo import create_rl_sampler
 from verl.utils.dataset.rl_dataset import RLHFDataset as _UpstreamRLHFDataset
-from verl.utils.dataset.rl_dataset import collate_fn
+from verl.utils.dataset.rl_dataset import collate_fn as _upstream_collate_fn
 from verl.utils.dataset.rl_dataset import get_dataset_class as _upstream_get_dataset_class
+from verl.utils.import_utils import load_extern_object
+
+collate_fn = _upstream_collate_fn
 
 __all__ = [
     "collate_fn",
     "RLHFDataset",
+    "get_collate_fn",
     "get_dataset_class",
     "create_rl_dataset",
     "create_rl_sampler",
@@ -54,6 +58,21 @@ class RLHFDataset(_UpstreamRLHFDataset):
         if negative_messages is not None:
             row_dict["raw_negative_prompt"] = negative_messages
         return row_dict
+
+
+def get_collate_fn(data_config: DictConfig):
+    """Get a custom collate function from data config, falling back to upstream default."""
+    if "custom_cls" in data_config and data_config.custom_cls.get("path", None) is not None:
+        collate_fn_name = data_config.custom_cls.get("collate_fn", None)
+        if collate_fn_name is not None:
+            custom_collate_fn = load_extern_object(data_config.custom_cls.path, collate_fn_name)
+            if not callable(custom_collate_fn):
+                raise TypeError(
+                    f"The custom collate function '{collate_fn_name}' from "
+                    f"'{data_config.custom_cls.path}' must be callable"
+                )
+            return custom_collate_fn
+    return _upstream_collate_fn
 
 
 def get_dataset_class(data_config: DictConfig):
