@@ -14,55 +14,91 @@
 """Diffusion-specific loss functions and KL penalties."""
 
 from collections import defaultdict
+from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, TypeVar
 
 import numpy as np
 import torch
 from omegaconf import DictConfig
+from tensordict import TensorDict
+from verl.utils.metric import AggregationType, Metric
 
 from verl_omni.workers.config import DiffusionActorConfig
 
-DiffusionLossFn = Callable[
-    [
-        torch.Tensor,  # old_log_prob
-        torch.Tensor,  # log_prob
-        torch.Tensor,  # advantages
-        Optional[DictConfig | DiffusionActorConfig],  # config
-    ],
-    tuple[torch.Tensor, dict[str, Any]],
-]
+
+@dataclass
+class DiffusionLossResult:
+    """Output from a batch-aware diffusion loss function."""
+
+    loss: torch.Tensor
+    metrics: dict[str, Any]
+    add_loss_metric: bool = True
+
+
+def _format_available_keys(mapping: Any) -> str:
+    try:
+        keys = sorted(str(key) for key in mapping.keys())
+    except AttributeError:
+        return f"<{type(mapping).__name__} has no keys()>"
+    return "[" + ", ".join(keys) + "]"
+
+
+class DiffusionLossFn:
+    """Base class for worker-side diffusion loss functions."""
+
+    required_model_output_keys: tuple[str, ...] = ()
+    required_data_keys: tuple[str, ...] = ()
+
+    def validate_inputs(
+        self,
+        *,
+        loss_name: str,
+        model_output: dict[str, Any],
+        data: TensorDict,
+    ) -> None:
+        """Validate that the worker batch contains inputs required by this loss."""
+
+        missing_model_output = [key for key in self.required_model_output_keys if key not in model_output]
+        missing_data = [key for key in self.required_data_keys if key not in data]
+        if not missing_model_output and not missing_data:
+            return
+
+        details = [f"Diffusion loss `{loss_name}` is missing required inputs."]
+        if missing_model_output:
+            details.append(f"Missing model_output keys: {missing_model_output}.")
+            details.append(f"Available model_output keys: {_format_available_keys(model_output)}.")
+        if missing_data:
+            details.append(f"Missing data keys: {missing_data}.")
+            details.append(f"Available data keys: {_format_available_keys(data)}.")
+        raise KeyError(" ".join(details))
+
+    def __call__(
+        self,
+        *,
+        config: DiffusionActorConfig,
+        model_output: dict[str, Any],
+        data: TensorDict,
+    ) -> DiffusionLossResult:
+        raise NotImplementedError
+
 
 DIFFUSION_LOSS_REGISTRY: dict[str, DiffusionLossFn] = {}
+DiffusionLossFnT = TypeVar("DiffusionLossFnT", bound=DiffusionLossFn)
 
 
-def register_diffusion_loss(name: str) -> Callable[[DiffusionLossFn], DiffusionLossFn]:
-    """Register a diffusion loss function with the given name.
+def register_diffusion_loss(name: str) -> Callable[[type[DiffusionLossFnT]], type[DiffusionLossFnT]]:
+    """Register a worker-side diffusion loss function class."""
 
-    Args:
-        name (str): The name to register the diffusion loss function under.
-
-    Returns:
-        function: Decorator function that registers the diffusion loss function.
-    """
-
-    def decorator(func: DiffusionLossFn) -> DiffusionLossFn:
-        DIFFUSION_LOSS_REGISTRY[name] = func
-        return func
+    def decorator(cls: type[DiffusionLossFnT]) -> type[DiffusionLossFnT]:
+        DIFFUSION_LOSS_REGISTRY[name] = cls()
+        return cls
 
     return decorator
 
 
-def get_diffusion_loss_fn(name):
-    """Get the diffusion loss with a given name.
-
-    Args:
-        name: `(str)`
-            The name of the policy loss.
-
-    Returns:
-        `(callable)`: The policy loss function.
-    """
+def get_diffusion_loss_fn(name: str) -> DiffusionLossFn:
+    """Get a worker-side diffusion loss function by name."""
     if name not in DIFFUSION_LOSS_REGISTRY:
         raise ValueError(
             f"Unsupported diffusion loss mode: {name}. Supported modes are: {list(DIFFUSION_LOSS_REGISTRY.keys())}"
@@ -188,7 +224,6 @@ def compute_flow_grpo_outcome_advantage(
     return scores, scores
 
 
-@register_diffusion_loss("flow_grpo")
 def compute_diffusion_loss_flow_grpo(
     old_log_prob: torch.Tensor,
     log_prob: torch.Tensor,
@@ -247,7 +282,29 @@ def compute_diffusion_loss_flow_grpo(
     return pg_loss, pg_metrics
 
 
-@register_diffusion_loss("grpo_guard")
+@register_diffusion_loss("flow_grpo")
+class FlowGRPOLossFunc(DiffusionLossFn):
+    """Build Flow-GRPO loss inputs from the worker batch."""
+
+    required_model_output_keys = ("log_probs",)
+    required_data_keys = ("old_log_probs", "advantages")
+
+    def __call__(
+        self,
+        *,
+        config: DiffusionActorConfig,
+        model_output: dict[str, Any],
+        data: TensorDict,
+    ) -> DiffusionLossResult:
+        loss, metrics = compute_diffusion_loss_flow_grpo(
+            old_log_prob=data["old_log_probs"],
+            log_prob=model_output["log_probs"],
+            advantages=data["advantages"],
+            config=config,
+        )
+        return DiffusionLossResult(loss=loss, metrics=metrics)
+
+
 def compute_diffusion_loss_grpo_guard(
     old_log_prob: torch.Tensor,
     log_prob: torch.Tensor,
@@ -341,7 +398,34 @@ def compute_diffusion_loss_grpo_guard(
     return pg_loss, pg_metrics
 
 
-def kl_penalty_image(
+@register_diffusion_loss("grpo_guard")
+class GRPOGuardLossFunc(DiffusionLossFn):
+    """Build GRPO-Guard loss inputs from the worker batch."""
+
+    required_model_output_keys = ("log_probs", "prev_sample_mean", "std_dev_t", "sqrt_dt")
+    required_data_keys = ("old_log_probs", "advantages", "old_prev_sample_mean")
+
+    def __call__(
+        self,
+        *,
+        config: DiffusionActorConfig,
+        model_output: dict[str, Any],
+        data: TensorDict,
+    ) -> DiffusionLossResult:
+        loss, metrics = compute_diffusion_loss_grpo_guard(
+            old_log_prob=data["old_log_probs"],
+            log_prob=model_output["log_probs"],
+            advantages=data["advantages"],
+            old_prev_sample_mean=data["old_prev_sample_mean"],
+            prev_sample_mean=model_output["prev_sample_mean"],
+            std_dev_t=model_output["std_dev_t"],
+            sqrt_dt=model_output["sqrt_dt"],
+            config=config,
+        )
+        return DiffusionLossResult(loss=loss, metrics=metrics)
+
+
+def kl_penalty(
     prev_sample_mean: torch.Tensor, ref_prev_sample_mean: torch.Tensor, std_dev_t: torch.Tensor
 ) -> torch.Tensor:
     """Compute KL divergence given previous sample mean and reference previous sample mean (for images or videos).
@@ -352,3 +436,32 @@ def kl_penalty_image(
     """
     kl_loss = ((prev_sample_mean - ref_prev_sample_mean) ** 2).mean(dim=(1, 2), keepdim=True) / (2 * std_dev_t**2)
     return kl_loss.mean()
+
+
+@register_diffusion_loss("kl")
+class KLLossFunc(DiffusionLossFn):
+    """Build diffusion KL regularization inputs from the worker batch."""
+
+    required_model_output_keys = ("prev_sample_mean", "std_dev_t")
+    required_data_keys = ("ref_prev_sample_mean",)
+
+    def __call__(
+        self,
+        *,
+        config: DiffusionActorConfig,
+        model_output: dict[str, Any],
+        data: TensorDict,
+    ) -> DiffusionLossResult:
+        kl_loss = kl_penalty(
+            prev_sample_mean=model_output["prev_sample_mean"],
+            ref_prev_sample_mean=data["ref_prev_sample_mean"],
+            std_dev_t=model_output["std_dev_t"],
+        )
+        return DiffusionLossResult(
+            loss=kl_loss,
+            metrics={
+                "kl_loss": Metric(value=kl_loss, aggregation=AggregationType.MEAN),
+                "kl_coef": config.kl_loss_coef,
+            },
+            add_loss_metric=False,
+        )

@@ -54,7 +54,7 @@ runtime:
 
    loss_mode
                 ↓
-   compute_diffusion_loss_flow_grpo
+   FlowGRPOLossFunc
 ```
 
 All four registries (`DiffusionModelBase`, `VllmOmniPipelineBase`,
@@ -147,19 +147,25 @@ extend the `if adv_estimator == DiffusionAdvantageEstimator.<NAME>:` branch in
 
 ## Step 3 — Register the Loss
 
-Still in `diffusion_algos.py`, register the per-step PPO-style loss:
+Open
+[`verl_omni/trainer/diffusion/diffusion_algos.py`](../../verl_omni/trainer/diffusion/diffusion_algos.py)
+and add the pure loss function plus the registered worker-side adapter:
 
 ```python
-@register_diffusion_loss("flow_grpo")
 def compute_diffusion_loss_flow_grpo(
     old_log_prob: torch.Tensor,
     log_prob: torch.Tensor,
     advantages: torch.Tensor,
-    config: Optional[DictConfig | DiffusionActorConfig] = None,
+    config: DiffusionActorConfig | None = None,
 ) -> tuple[torch.Tensor, dict[str, Any]]:
-    """Clipped-PPO objective averaged across denoising steps."""
     ...
     return pg_loss, pg_metrics
+
+@register_diffusion_loss("flow_grpo")
+class FlowGRPOLossFunc:
+    def __call__(self, *, config, model_output, data) -> DiffusionLossResult:
+        pg_loss, pg_metrics = compute_diffusion_loss_flow_grpo(...)
+        return DiffusionLossResult(loss=pg_loss, metrics=pg_metrics)
 ```
 
 Finally, add the loss name to the validation list in
