@@ -20,13 +20,12 @@ The output schema is one logical preference pair per row:
      img_win_latents, img_lose_latents, prompt_embeds, ...}
 
 Training expands each row to adjacent ``win, lose`` samples and consumes the
-precomputed SD3 latents and text embeddings directly.
+precomputed diffusion latents and text embeddings directly.
 """
 
 import argparse
 import asyncio
 import importlib.util
-import io
 import os
 import shlex
 import subprocess
@@ -43,6 +42,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import torch
 from PIL import Image
+from pipeline_utils import get_pipeline_utils
 
 DEFAULT_SYSTEM_PROMPT = "You are a helpful image generation assistant."
 DEFAULT_REWARD_SERVER_COMMAND = "vllm serve {model} --host {host} --port {port} --dtype bfloat16 --enforce-eager"
@@ -123,75 +123,6 @@ async def _score_image(reward_fn, image: Image.Image, prompt: str, args: argpars
 def _make_generator(seed: int, device: str) -> torch.Generator:
     generator_device = device if device != "cpu" else "cpu"
     return torch.Generator(device=generator_device).manual_seed(seed)
-
-
-def _tensor_to_bytes(tensor: torch.Tensor) -> bytes:
-    buffer = io.BytesIO()
-    torch.save(tensor.detach().cpu(), buffer)
-    return buffer.getvalue()
-
-
-def _encode_image_latent(pipe, image: Image.Image, args: argparse.Namespace) -> torch.Tensor:
-    pixel_values = pipe.image_processor.preprocess([image], height=args.height, width=args.width)
-    pixel_values = pixel_values.to(device=args.device, dtype=pipe.vae.dtype)
-    with torch.no_grad():
-        latents = pipe.vae.encode(pixel_values).latent_dist.sample()
-    scaling_factor = getattr(pipe.vae.config, "scaling_factor", 1.0)
-    shift_factor = getattr(pipe.vae.config, "shift_factor", 0.0)
-    latents = (latents - shift_factor) * scaling_factor
-    return latents[0].detach().cpu()
-
-
-def _encode_prompt_tensors(pipe, prompt: str, negative_prompt: str, args: argparse.Namespace) -> dict[str, list | None]:
-    do_cfg = args.guidance_scale is not None and args.guidance_scale > 1.0
-    with torch.no_grad():
-        encoded = pipe.encode_prompt(
-            prompt=[prompt],
-            prompt_2=None,
-            prompt_3=None,
-            device=args.device,
-            num_images_per_prompt=1,
-            do_classifier_free_guidance=do_cfg,
-            negative_prompt=[negative_prompt] if do_cfg else None,
-            negative_prompt_2=None,
-            negative_prompt_3=None,
-            max_sequence_length=args.max_sequence_length,
-        )
-
-    if len(encoded) == 4:
-        prompt_embeds, negative_prompt_embeds, pooled_prompt_embeds, negative_pooled_prompt_embeds = encoded
-    elif len(encoded) == 2:
-        prompt_embeds, pooled_prompt_embeds = encoded
-        negative_prompt_embeds = None
-        negative_pooled_prompt_embeds = None
-    else:
-        raise ValueError(f"Unexpected SD3 encode_prompt output length: {len(encoded)}")
-
-    prompt_embeds_mask = torch.ones(
-        prompt_embeds.shape[0],
-        prompt_embeds.shape[1],
-        dtype=torch.int32,
-        device=prompt_embeds.device,
-    )
-    result = {
-        "prompt_embeds": _tensor_to_bytes(prompt_embeds[0]),
-        "prompt_embeds_mask": _tensor_to_bytes(prompt_embeds_mask[0]),
-        "pooled_prompt_embeds": _tensor_to_bytes(pooled_prompt_embeds[0]),
-        "negative_prompt_embeds": None,
-        "negative_prompt_embeds_mask": None,
-        "negative_pooled_prompt_embeds": None,
-    }
-    if negative_prompt_embeds is not None:
-        negative_prompt_embeds_mask = torch.ones(
-            negative_prompt_embeds.shape[0],
-            negative_prompt_embeds.shape[1],
-            dtype=torch.int32,
-            device=negative_prompt_embeds.device,
-        )
-        result["negative_prompt_embeds"] = _tensor_to_bytes(negative_prompt_embeds[0])
-        result["negative_prompt_embeds_mask"] = _tensor_to_bytes(negative_prompt_embeds_mask[0])
-        result["negative_pooled_prompt_embeds"] = _tensor_to_bytes(negative_pooled_prompt_embeds[0])
-    return result
 
 
 def _router_url(host: str, port: int, path: str) -> str:
@@ -305,8 +236,7 @@ def _maybe_launch_reward_server(args: argparse.Namespace):
 
 
 async def _generate_split(args: argparse.Namespace, split: str) -> Path:
-    from diffusers import StableDiffusion3Pipeline
-
+    pipeline_utils = get_pipeline_utils(args)
     input_path = Path(os.path.expanduser(args.input_file))
     output_path = Path(os.path.expanduser(args.output_file))
     prompts = _read_prompts(input_path, args.prompt_key)
@@ -321,7 +251,7 @@ async def _generate_split(args: argparse.Namespace, split: str) -> Path:
     image_dir.mkdir(parents=True, exist_ok=True)
 
     dtype = {"float16": torch.float16, "bfloat16": torch.bfloat16, "float32": torch.float32}[args.dtype]
-    pipe = StableDiffusion3Pipeline.from_pretrained(args.model_path, torch_dtype=dtype)
+    pipe = pipeline_utils.load_pipeline(args, dtype)
     pipe.to(args.device)
     pipe.set_progress_bar_config(disable=args.disable_progress)
     reward_fn = _load_reward_fn(args.reward_function_path, args.reward_function_name)
@@ -348,7 +278,9 @@ async def _generate_split(args: argparse.Namespace, split: str) -> Path:
                 candidates.append(
                     {
                         "path": str(image_path),
-                        "latents": _tensor_to_bytes(_encode_image_latent(pipe, image, args)),
+                        "latents": pipeline_utils.tensor_to_bytes(
+                            pipeline_utils.encode_image_latent(pipe, image, args)
+                        ),
                         "score": score,
                         "seed": seed,
                     }
@@ -360,6 +292,7 @@ async def _generate_split(args: argparse.Namespace, split: str) -> Path:
             writer.write(
                 {
                     "data_source": args.data_source,
+                    "pipeline": args.pipeline,
                     "prompt": _build_messages(prompt, args.system_prompt),
                     "negative_prompt": _build_messages(args.negative_prompt, args.system_prompt),
                     "img_win": os.path.relpath(win["path"], output_path.parent),
@@ -393,6 +326,12 @@ def main():
     parser.add_argument("--output_file", required=True, help="Parquet file to write.")
     parser.add_argument("--image_dir", default=None, help="Directory to write generated images.")
     parser.add_argument("--prompt_key", default="prompt", help="Prompt column for parquet/json inputs.")
+    parser.add_argument(
+        "--pipeline",
+        choices=["auto", "sd3", "qwen_image"],
+        default="auto",
+        help="Reference image pipeline used to generate tensors for offline DPO. `auto` infers from --model_path.",
+    )
     parser.add_argument("--model_path", default="stabilityai/stable-diffusion-3.5-medium")
     parser.add_argument("--data_source", default="offline_dpo")
     parser.add_argument("--system_prompt", default=DEFAULT_SYSTEM_PROMPT)
@@ -402,6 +341,7 @@ def main():
     parser.add_argument("--width", type=int, default=512)
     parser.add_argument("--num_inference_steps", type=int, default=40)
     parser.add_argument("--guidance_scale", type=float, default=4.0)
+    parser.add_argument("--true_cfg_scale", type=float, default=4.0, help="Qwen-Image True-CFG scale.")
     parser.add_argument("--max_sequence_length", type=int, default=256)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
@@ -460,6 +400,7 @@ def main():
     parser.add_argument("--disable_progress", action="store_true")
     parser.add_argument("--split", default=None, help="Optional split name stored in extra_info.split.")
     args = parser.parse_args()
+    get_pipeline_utils(args)
     _apply_gpu_device_defaults(args)
     print(f"Image generation device: {args.device}.")
 
