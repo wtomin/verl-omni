@@ -156,13 +156,19 @@ def compute_diffusion_loss_flow_grpo(
     old_log_prob: torch.Tensor,
     log_prob: torch.Tensor,
     advantages: torch.Tensor,
-    config: DiffusionActorConfig | None = None,
+    config: Optional[DictConfig | DiffusionActorConfig] = None,
 ) -> tuple[torch.Tensor, dict[str, Any]]:
+    """Clipped-PPO objective averaged across denoising steps."""
     ...
     return pg_loss, pg_metrics
 
 @register_diffusion_loss("flow_grpo")
-class FlowGRPOLossFunc:
+class FlowGRPOLossFunc(DiffusionLossFn):
+    """Build Flow-GRPO loss inputs from the worker batch."""
+
+    required_model_output_keys = ("log_probs",)
+    required_data_keys = ("old_log_probs", "advantages")
+
     def __call__(self, *, config, model_output, data) -> DiffusionLossResult:
         pg_loss, pg_metrics = compute_diffusion_loss_flow_grpo(...)
         return DiffusionLossResult(loss=pg_loss, metrics=pg_metrics)
