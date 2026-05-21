@@ -48,7 +48,7 @@ def diffusion_loss(config: DiffusionActorConfig, model_output, data: TensorDict,
         metrics.update(Metric.from_dict(kl_result.metrics, aggregation=AggregationType.MEAN))
         metrics["kl_coef"] = config.kl_loss_coef
         if kl_result.add_loss_metric:
-            metrics["actor/kl_loss_term"] = Metric(
+            metrics["actor/weighted_kl_loss"] = Metric(
                 value=kl_result.loss * config.kl_loss_coef,
                 aggregation=AggregationType.MEAN,
             )
