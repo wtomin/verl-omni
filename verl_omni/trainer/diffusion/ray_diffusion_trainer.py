@@ -1094,6 +1094,7 @@ class RayFlowGRPOTrainer:
                             )
 
                     if is_dpo:
+                        batch.batch["sample_level_rewards"] = batch.batch["sample_level_scores"]
                         batch = self._materialize_dpo_flow_batch(batch)
                         if self.use_reference_policy:
                             with marked_timer(str(Role.RefPolicy), timing_raw, color="olive"):
