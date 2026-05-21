@@ -85,9 +85,9 @@ bash examples/dpo_trainer/run_sd35_medium_offline_dpo_lora.sh \
 
 During training, `offline_dpo_trainer.yaml` sets `algorithm.dpo_mode=offline`
 and `data.offline_dpo=true`. The dataset expands each row into adjacent
-`[win, lose]` samples with a shared `uid`. The training loop consumes the
-precomputed `image_latents` plus SD3 prompt embeddings from parquet before
-calling the DPO loss, so it does not load the SD3 VAE or text encoders during
+`[win, lose]` samples with a shared `uid`. Collate stacks the precomputed
+`image_latents` plus SD3 prompt embeddings from parquet before calling the DPO
+loss, so training does not load the SD3 VAE or text encoders during
 actor updates. Offline DPO also disables rollout and reward workers, so
 validation generation is disabled by default.
 
