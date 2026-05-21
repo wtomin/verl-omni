@@ -152,25 +152,33 @@ Open
 and add the pure loss function plus the registered worker-side adapter:
 
 ```python
-def compute_diffusion_loss_flow_grpo(
-    old_log_prob: torch.Tensor,
-    log_prob: torch.Tensor,
-    advantages: torch.Tensor,
-    config: Optional[DictConfig | DiffusionActorConfig] = None,
-) -> tuple[torch.Tensor, dict[str, Any]]:
-    """Clipped-PPO objective averaged across denoising steps."""
-    ...
-    return pg_loss, pg_metrics
-
 @register_diffusion_loss("flow_grpo")
 class FlowGRPOLoss(DiffusionLossFn):
-    """Build Flow-GRPO loss inputs from the worker batch."""
+    """Flow-GRPO clipped policy objective."""
 
     required_model_output_keys = ("log_probs",)
     required_data_keys = ("old_log_probs", "advantages")
 
+    @classmethod
+    def compute_loss(
+        cls,
+        *,
+        old_log_prob: torch.Tensor,
+        log_prob: torch.Tensor,
+        advantages: torch.Tensor,
+        config: DiffusionActorConfig,
+    ) -> tuple[torch.Tensor, dict[str, Any]]:
+        """Clipped-PPO objective averaged across denoising steps."""
+        ...
+        return pg_loss, pg_metrics
+
     def __call__(self, *, config, model_output, data) -> DiffusionLossResult:
-        pg_loss, pg_metrics = compute_diffusion_loss_flow_grpo(...)
+        pg_loss, pg_metrics = self.compute_loss(
+            old_log_prob=data["old_log_probs"],
+            log_prob=model_output["log_probs"],
+            advantages=data["advantages"],
+            config=config,
+        )
         return DiffusionLossResult(loss=pg_loss, metrics=pg_metrics)
 ```
 

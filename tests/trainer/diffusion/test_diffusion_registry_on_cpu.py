@@ -24,26 +24,33 @@ from verl_omni.trainer.diffusion.diffusion_algos import (
     DIFFUSION_LOSS_REGISTRY,
     DiffusionAdvantageEstimator,
     DiffusionLossResult,
+    KLLoss,
     get_diffusion_adv_estimator_fn,
     get_diffusion_loss_fn,
-    kl_penalty,
     register_diffusion_adv_est,
     register_diffusion_loss,
 )
 
 # ---------------------------------------------------------------------------
-# kl_penalty
+# KLLoss.compute_loss
 # ---------------------------------------------------------------------------
 
 
 class TestKLPenalty:
+    def setup_method(self):
+        self.kl_loss = KLLoss()
+
     @pytest.mark.parametrize("batch_size,seq_len,channels", [(4, 16, 3), (1, 64, 16), (8, 4, 8)])
     def test_output_is_scalar(self, batch_size, seq_len, channels):
         mean = torch.randn(batch_size, seq_len, channels)
         ref_mean = torch.randn(batch_size, seq_len, channels)
         std_dev_t = torch.rand(batch_size, 1, 1) + 0.1  # strictly positive
 
-        loss = kl_penalty(mean, ref_mean, std_dev_t)
+        loss, _ = self.kl_loss.compute_loss(
+            prev_sample_mean=mean,
+            ref_prev_sample_mean=ref_mean,
+            std_dev_t=std_dev_t,
+        )
 
         assert loss.shape == ()
         assert loss.item() >= 0.0
@@ -53,7 +60,11 @@ class TestKLPenalty:
         mean = torch.randn(4, 16, 3)
         std_dev_t = torch.ones(4, 1, 1)
 
-        loss = kl_penalty(mean, mean.clone(), std_dev_t)
+        loss, _ = self.kl_loss.compute_loss(
+            prev_sample_mean=mean,
+            ref_prev_sample_mean=mean.clone(),
+            std_dev_t=std_dev_t,
+        )
 
         assert loss.item() == pytest.approx(0.0, abs=1e-6)
 
@@ -64,8 +75,18 @@ class TestKLPenalty:
         large_ref = mean + 10.0
         std_dev_t = torch.ones(4, 1, 1)
 
-        loss_small = kl_penalty(mean, small_ref, std_dev_t).item()
-        loss_large = kl_penalty(mean, large_ref, std_dev_t).item()
+        loss_small, _ = self.kl_loss.compute_loss(
+            prev_sample_mean=mean,
+            ref_prev_sample_mean=small_ref,
+            std_dev_t=std_dev_t,
+        )
+        loss_large, _ = self.kl_loss.compute_loss(
+            prev_sample_mean=mean,
+            ref_prev_sample_mean=large_ref,
+            std_dev_t=std_dev_t,
+        )
+        loss_small = loss_small.item()
+        loss_large = loss_large.item()
 
         assert loss_large > loss_small
 
