@@ -88,6 +88,7 @@ class DiffusionLossFn(ABC):
         Subclasses define concrete tensor arguments (e.g. ``old_log_prob``,
         ``log_prob``, ``advantages``) in their implementation.
         """
+        raise NotImplementedError
 
     @abstractmethod
     def __call__(
@@ -98,6 +99,7 @@ class DiffusionLossFn(ABC):
         data: TensorDict,
     ) -> DiffusionLossResult:
         """Compute loss and metrics from the worker batch."""
+        raise NotImplementedError
 
 
 DIFFUSION_LOSS_REGISTRY: dict[str, DiffusionLossFn] = {}
