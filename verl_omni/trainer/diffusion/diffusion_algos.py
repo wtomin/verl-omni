@@ -17,7 +17,7 @@ from abc import ABC, abstractmethod
 from collections import defaultdict
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Callable, Optional, TypeVar
+from typing import Any, Callable, Optional
 
 import numpy as np
 import torch
@@ -93,13 +93,12 @@ class DiffusionLossFn(ABC):
 
 
 DIFFUSION_LOSS_REGISTRY: dict[str, DiffusionLossFn] = {}
-DiffusionLossFnT = TypeVar("DiffusionLossFnT", bound=DiffusionLossFn)
 
 
-def register_diffusion_loss(name: str) -> Callable[[type[DiffusionLossFnT]], type[DiffusionLossFnT]]:
+def register_diffusion_loss(name: str) -> Callable[[type[DiffusionLossFn]], type[DiffusionLossFn]]:
     """Register a worker-side diffusion loss function class."""
 
-    def decorator(cls: type[DiffusionLossFnT]) -> type[DiffusionLossFnT]:
+    def decorator(cls: type[DiffusionLossFn]) -> type[DiffusionLossFn]:
         DIFFUSION_LOSS_REGISTRY[name] = cls()
         return cls
 
