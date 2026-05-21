@@ -13,6 +13,8 @@
 # limitations under the License.
 """RLHF Dataset for diffusion model training."""
 
+import logging
+
 from omegaconf import DictConfig
 from verl.trainer.main_ppo import create_rl_dataset as _upstream_create_rl_dataset
 from verl.trainer.main_ppo import create_rl_sampler
@@ -22,6 +24,7 @@ from verl.utils.dataset.rl_dataset import get_dataset_class as _upstream_get_dat
 from verl.utils.import_utils import load_extern_object
 
 collate_fn = _upstream_collate_fn
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "collate_fn",
@@ -71,7 +74,9 @@ def get_collate_fn(data_config: DictConfig):
                     f"The custom collate function '{collate_fn_name}' from "
                     f"'{data_config.custom_cls.path}' must be callable"
                 )
+            logger.info("Using custom collate function: %s", collate_fn_name)
             return custom_collate_fn
+    logger.info("Using default collate function")
     return _upstream_collate_fn
 
 
@@ -89,7 +94,7 @@ def get_dataset_class(data_config: DictConfig):
     # and if the path to the custom class is provided
     if "custom_cls" in data_config and data_config.custom_cls.get("path", None) is not None:
         return _upstream_get_dataset_class(data_config)
-    print(f"Using dataset class: {RLHFDataset.__name__}")
+    logger.info("Using dataset class: %s", RLHFDataset.__name__)
     return RLHFDataset
 
 
