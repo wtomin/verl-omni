@@ -163,7 +163,6 @@ class RayFlowGRPOTrainer:
             config.algorithm.adv_estimator == DiffusionAdvantageEstimator.DPO.value
             and config.algorithm.get("dpo_mode", "online") == "offline"
         )
-        self.offline_dpo_materializer = None
 
         self.hybrid_engine = config.actor_rollout_ref.hybrid_engine
         assert self.hybrid_engine, "Currently, only support hybrid engine"
@@ -403,14 +402,6 @@ class RayFlowGRPOTrainer:
         assert self.reward_loop_manager is not None, "RewardLoopManager is None"
         batch_reward = self.reward_loop_manager.compute_rm_score(batch)
         return batch_reward
-
-    def _materialize_offline_dpo_batch(self, batch: DataProto) -> DataProto:
-        """Encode offline image paths and prompts into the tensors expected by DPO training."""
-        if self.offline_dpo_materializer is None:
-            from verl_omni.trainer.diffusion.offline_dpo_materializer import OfflineDPOMaterializer
-
-            self.offline_dpo_materializer = OfflineDPOMaterializer(self.config)
-        return self.offline_dpo_materializer.materialize(batch)
 
     def _validate(self):
         if self.is_offline_dpo and not hasattr(self, "async_rollout_manager"):
@@ -1013,7 +1004,9 @@ class RayFlowGRPOTrainer:
                 if is_offline_dpo and not is_dpo:
                     raise ValueError("Offline DPO mode requires algorithm.adv_estimator=dpo.")
                 if is_dpo and not is_offline_dpo:
-                    raise ValueError("Diffusion DPO currently supports offline mode only. Set algorithm.dpo_mode=offline.")
+                    raise ValueError(
+                        "Diffusion DPO currently supports offline mode only. Set algorithm.dpo_mode=offline."
+                    )
 
                 # add uid to batch
                 if "uid" not in batch.non_tensor_batch:
@@ -1034,10 +1027,6 @@ class RayFlowGRPOTrainer:
                 with marked_timer("step", timing_raw):
                     reward_extra_infos_dict: dict[str, list] = {}
                     if is_offline_dpo:
-                        with marked_timer("offline_materialize", timing_raw, color="red"):
-                            batch = self._materialize_offline_dpo_batch(batch)
-                        if "sample_level_scores" not in batch.batch:
-                            raise KeyError("Offline DPO batches must contain `sample_level_scores`.")
                         reward_tensor = batch.batch["sample_level_scores"]
                     else:
                         # generate a batch
