@@ -86,6 +86,50 @@ def set_timesteps(scheduler: SchedulerMixin, model_config: DiffusionModelConfig)
     DiffusionModelBase.get_class(model_config).set_timesteps(scheduler, model_config, get_device_name())
 
 
+def sample_noise_and_timesteps(
+    latents: torch.Tensor,
+    scheduler: SchedulerMixin,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Sample shared flow-matching noise and timesteps for a latent batch."""
+    noise = torch.randn_like(latents)
+    timestep_indices = torch.randint(
+        0,
+        len(scheduler.timesteps),
+        (latents.shape[0],),
+        device=latents.device,
+    )
+    timesteps = scheduler.timesteps.to(device=latents.device)[timestep_indices]
+    return noise, timesteps
+
+
+def prepare_noisy_latents(
+    latents: torch.Tensor,
+    scheduler: SchedulerMixin,
+    noise: torch.Tensor | None = None,
+    timesteps: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Build noisy latents and return the aligned noise/timesteps tensors."""
+    if (noise is None) != (timesteps is None):
+        raise KeyError("Diffusion flow training requires `noise` and `timesteps` to be provided together.")
+
+    if noise is None:
+        noise, timesteps = sample_noise_and_timesteps(latents, scheduler)
+    else:
+        noise = noise.to(device=latents.device, dtype=latents.dtype)
+        timesteps = timesteps.to(device=latents.device)
+
+    if hasattr(scheduler, "scale_noise"):
+        noisy_latents = scheduler.scale_noise(latents, timesteps, noise)
+    else:
+        scheduler_timesteps = scheduler.timesteps.to(device=latents.device)
+        timestep_indices = (scheduler_timesteps[None, :] - timesteps[:, None]).abs().argmin(dim=1)
+        sigmas = scheduler.sigmas.to(device=latents.device, dtype=latents.dtype)[timestep_indices]
+        sigmas = sigmas.view(-1, *([1] * (latents.ndim - 1)))
+        noisy_latents = (1.0 - sigmas) * latents + sigmas * noise
+
+    return noisy_latents, noise, timesteps
+
+
 def forward_and_sample_previous_step(
     module: ModelMixin,
     scheduler: SchedulerMixin,
