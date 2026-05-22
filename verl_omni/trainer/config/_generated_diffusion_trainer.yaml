@@ -83,6 +83,7 @@ actor_rollout_ref:
       rollout_is_batch_normalize: ${oc.select:algorithm.rollout_correction.rollout_is_batch_normalize,false}
       rollout_rs: ${oc.select:algorithm.rollout_correction.rollout_rs,null}
       rollout_rs_threshold: ${oc.select:algorithm.rollout_correction.rollout_rs_threshold,null}
+      dpo_beta: 2000.0
     loss_scale_factor: null
     use_kl_loss: false
     kl_loss_coef: 0.001
