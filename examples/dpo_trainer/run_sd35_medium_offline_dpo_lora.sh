@@ -12,7 +12,7 @@ model_name=stabilityai/stable-diffusion-3.5-medium
 
 NUM_GPUS_ACTOR=1
 
-python3 -m verl_omni.trainer.diffusion.main_dpo --config-name=offline_dpo_trainer \
+python3 -m verl_omni.trainer.main_diffusion --config-name=offline_dpo_trainer \
     data.train_files=$offline_train_path \
     data.val_files=$offline_test_path \
     trainer.resume_mode=disable \
