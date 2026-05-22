@@ -511,7 +511,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def init_model(self):
         model_config: HFModelConfig | DiffusionModelConfig = omega_conf_to_dataclass(self.config.model)
-        is_diffusion = model_config.get("model_type", "language_model") in ("diffusion_model", "diffusion_dpo_model")
+        is_diffusion = model_config.get("model_type", "language_model") in ("diffusion_model", "diffusion_dp_model")
 
         # 1. build reference model
         if "ref" in self.role:
@@ -625,7 +625,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 self.loss_fn = partial(
                     distillation_ppo_loss, config=actor_config, distillation_config=distillation_config
                 )
-            elif model_config.get("model_type", "language_model") in ("diffusion_model", "diffusion_dpo_model"):
+            elif model_config.get("model_type", "language_model") in ("diffusion_model", "diffusion_dp_model"):
                 self.loss_fn = partial(diffusion_loss, config=actor_config)
             else:
                 self.loss_fn = partial(ppo_loss, config=actor_config)
