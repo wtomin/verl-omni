@@ -31,4 +31,3 @@ class DiffusionAlgoConfig(BaseConfig):
     norm_adv_by_std_in_grpo: bool = True
     bypass_mode: bool = False
     global_std: bool = True
-    dpo_mode: str = "offline"

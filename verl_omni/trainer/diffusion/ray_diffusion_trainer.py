@@ -15,8 +15,9 @@
 Flow-GRPO / diffusion trainer with a Ray-based single controller.
 This trainer supports model-agnostic model initialization with Hugging Face.
 """
-import logging
+
 import json
+import logging
 import os
 import uuid
 from abc import ABC, abstractmethod
@@ -60,6 +61,17 @@ from verl_omni.trainer.diffusion.diffusion_metric_utils import (
 from verl_omni.workers.utils.padding import embeds_padding_2_no_padding
 
 sys_logger = logging.getLogger(__name__)
+
+
+class _NoOpCheckpointManager:
+    """Checkpoint-engine facade used when offline training does not start rollout replicas."""
+
+    def update_weights(self, *args, **kwargs):
+        del args, kwargs
+
+    def sleep_replicas(self):
+        return None
+
 
 def compute_advantage(
     data: DataProto,
@@ -1124,6 +1136,35 @@ class PolicyGradientRayTrainer(BaseRayDiffusionTrainer):
 class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
     """Direct-preference diffusion trainer for DPO, DiffusionNFT, AWM, etc."""
 
+    def __init__(
+        self,
+        config,
+        *args,
+        **kwargs,
+    ):
+        super().__init__(config=config, *args, **kwargs)
+        self.is_offline_dpo = config.algorithm.get("sample_source", "online") == "offline"
+        # Direct-preference losses (e.g. DPO) need ref noise preds even when KL paths are disabled.
+        self.use_reference_policy = need_reference_policy(self.config) or (
+            config.algorithm.get("trainer_type") == "direct_preference"
+        )
+
+    def init_workers(self):
+        """Initialize actor-only workers for offline DPO, or full stack for online preference training."""
+        actor_rollout_resource_pool = self._init_colocated_workers()
+        if self.is_offline_dpo:
+            self.reward_loop_manager = None
+            self.llm_server_manager = None
+            self.checkpoint_manager = _NoOpCheckpointManager()  # no rollout replicas needed
+            return
+        self._init_online_rollout_stack(actor_rollout_resource_pool)
+
+    def _validate(self):
+        if self.is_offline_dpo and not hasattr(self, "async_rollout_manager"):
+            print("Skipping validation generation because offline DPO rollout is disabled.")
+            return {"val/offline_dpo/skipped": 1.0}
+        return super()._validate()
+
     def _update_actor(self, batch: DataProto) -> DataProto:
         rollout_config = self.config.actor_rollout_ref.rollout
         batch.meta_info["multi_turn"] = rollout_config.multi_turn.enable
@@ -1132,7 +1173,9 @@ class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
         # step 2: convert from padding to no-padding
         batch_td = embeds_padding_2_no_padding(batch_td)
         ppo_mini_batch_size = self.config.actor_rollout_ref.actor.ppo_mini_batch_size
-        ppo_mini_batch_size = ppo_mini_batch_size * self.config.actor_rollout_ref.rollout.n * 2 # direct preference has a pair per prompt
+        ppo_mini_batch_size = (
+            ppo_mini_batch_size * self.config.actor_rollout_ref.rollout.n * 2
+        )  # direct preference has a pair per prompt
         ppo_epochs = self.config.actor_rollout_ref.actor.ppo_epochs
         seed = self.config.actor_rollout_ref.actor.data_loader_seed
         if self.config.actor_rollout_ref.actor.shuffle:
@@ -1265,14 +1308,7 @@ class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
                     )
 
                 batch: DataProto = DataProto.from_single_dict(batch_dict)
-                is_dpo = self.config.algorithm.adv_estimator == DiffusionAdvantageEstimator.DPO.value
                 is_offline_dpo = self.is_offline_dpo
-                if is_offline_dpo and not is_dpo:
-                    raise ValueError("Offline DPO mode requires algorithm.adv_estimator=dpo.")
-                if is_dpo and not is_offline_dpo:
-                    raise ValueError(
-                        "Diffusion DPO currently supports offline mode only. Set algorithm.dpo_mode=offline."
-                    )
                 if "uid" not in batch.non_tensor_batch:
                     batch.non_tensor_batch["uid"] = np.array(
                         [str(uuid.uuid4()) for _ in range(len(batch.batch))], dtype=object
@@ -1318,7 +1354,7 @@ class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
 
                         if reward_extra_infos_dict:
                             batch.non_tensor_batch.update({k: np.array(v) for k, v in reward_extra_infos_dict.items()})
-                    
+
                     batch.batch["sample_level_rewards"] = batch.batch["sample_level_scores"]
                     batch = self._materialize_dpo_flow_batch(batch)
                     if self.use_reference_policy:

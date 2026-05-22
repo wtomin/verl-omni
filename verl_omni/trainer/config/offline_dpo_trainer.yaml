@@ -118,8 +118,11 @@ algorithm:
   # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs.
   _target_: verl_omni.trainer.config.DiffusionAlgoConfig
 
-  # Advantage estimator type.
-  adv_estimator: dpo
+  # Trainer loop: direct_preference for DPO / DiffusionNFT / AWM.
+  trainer_type: direct_preference
+
+  # Sample provenance: offline skips rollout, reward scoring and pair selection.
+  sample_source: offline
 
   # Whether to normalize advantages by std.
   norm_adv_by_std_in_grpo: false
@@ -130,16 +133,10 @@ algorithm:
   # Whether to bypass old log-prob recomputation.
   bypass_mode: true
 
-  # DPO data mode. "offline" skips training-time rollout, reward scoring and pair selection.
-  dpo_mode: offline
-
 # Offline pair data configuration.
 data:
 
-  # Enable the offline DPO dataset that expands each row into adjacent win/lose samples.
-  offline_dpo: true
-
-  # Use the generic custom dataset hook instead of branching in rl_dataset.py.
+  # Use the generic custom dataset hook for offline DPO win/lose pair expansion.
   custom_cls:
 
     # Module containing the offline DPO dataset class.

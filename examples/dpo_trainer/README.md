@@ -83,8 +83,8 @@ bash examples/dpo_trainer/run_sd35_medium_offline_dpo_lora.sh \
   data.val_files=data/offline_dpo/test.parquet
 ```
 
-During training, `offline_dpo_trainer.yaml` sets `algorithm.dpo_mode=offline`
-and `data.offline_dpo=true`. The dataset expands each row into adjacent
+During training, `offline_dpo_trainer.yaml` sets `algorithm.sample_source=offline`
+and loads `OfflineDPODataset` via `data.custom_cls`. The dataset expands each row into adjacent
 `[win, lose]` samples with a shared `uid`. Collate stacks the precomputed
 `image_latents` plus SD3 prompt embeddings from parquet before calling the DPO
 loss, so training does not load the SD3 VAE or text encoders during
