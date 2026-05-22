@@ -29,8 +29,8 @@ from verl.utils.config import omega_conf_to_dataclass
 
 from verl_omni.trainer.diffusion.diffusion_algos import (
     DIFFUSION_LOSS_REGISTRY,
-    DPOLoss,
     DiffusionLossResult,
+    DPOLoss,
     FlowGRPOLoss,
     GRPOGuardLoss,
     KLLoss,
