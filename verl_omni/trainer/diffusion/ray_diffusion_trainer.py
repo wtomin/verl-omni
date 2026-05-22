@@ -847,9 +847,9 @@ class PolicyGradientRayTrainer(BaseRayDiffusionTrainer):
             metadata["no_lora_adapter"] = True
         tu.assign_non_tensor(batch_td, **metadata)
         if self.ref_in_actor:
-            output = self.actor_rollout_wg.compute_log_prob(batch_td)
+            output = self.actor_rollout_wg.infer_actor_batch(batch_td)
         else:
-            output = self.ref_policy_wg.compute_ref_log_prob(batch_td)
+            output = self.ref_policy_wg.infer_ref_batch(batch_td)
         # gather output
         log_probs = tu.get(output, "log_probs")
         prev_sample_mean = tu.get(output, "prev_sample_mean")
@@ -868,7 +868,7 @@ class PolicyGradientRayTrainer(BaseRayDiffusionTrainer):
             width=self.config.actor_rollout_ref.model.pipeline.width,
             vae_scale_factor=self.config.actor_rollout_ref.model.get("vae_scale_factor", 8),
         )
-        output = self.actor_rollout_wg.compute_log_prob(batch_td)
+        output = self.actor_rollout_wg.infer_actor_batch(batch_td)
         log_probs = tu.get(output, "log_probs")
         old_log_prob_dict = {"old_log_probs": log_probs.float()}
         prev_sample_mean = tu.get(output, "prev_sample_mean")
@@ -1195,28 +1195,8 @@ class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
         actor_output = rename_dict(actor_output, "actor/")
         return DataProto.from_single_dict(data={}, meta_info={"metrics": actor_output})
 
-    def _materialize_dpo_flow_batch(self, batch: DataProto) -> DataProto:
-        """Sample shared noise / timesteps / flow target for diffusion DPO (policy, ref, train use the same)."""
-        batch_td = batch.to_tensordict()
-        batch_td = embeds_padding_2_no_padding(batch_td)
-        tu.assign_non_tensor(
-            batch_td,
-            height=self.config.actor_rollout_ref.model.pipeline.height,
-            width=self.config.actor_rollout_ref.model.pipeline.width,
-            vae_scale_factor=self.config.actor_rollout_ref.model.get("vae_scale_factor", 8),
-        )
-        out_td = self.actor_rollout_wg.materialize_dpo_flow_batch(batch_td)
-        if out_td is None:
-            return batch
-        required_keys = ("dpo_noise", "dpo_timesteps")
-        missing_keys = [key for key in required_keys if key not in out_td.keys()]
-        if missing_keys:
-            raise KeyError(f"materialize_dpo_flow_batch did not return required keys: {missing_keys}")
-        out_td = out_td.select(*required_keys)
-        return batch.union(DataProto.from_tensordict(out_td))
-
-    def _compute_dpo_ref_noise_pred(self, batch: DataProto) -> Optional[DataProto]:
-        """Reference transformer output (e.g. flow-matching noise prediction)."""
+    def _compute_ref_noise_pred(self, batch: DataProto) -> Optional[DataProto]:
+        """Reference transformer output and shared flow tensors for DPO."""
         batch_td = batch.to_tensordict()
         batch_td = embeds_padding_2_no_padding(batch_td)
         metadata = {
@@ -1229,12 +1209,27 @@ class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
             metadata["no_lora_adapter"] = True
         tu.assign_non_tensor(batch_td, **metadata)
         if self.ref_in_actor:
-            output = self.actor_rollout_wg.compute_dpo_ref_noise_pred_via_actor_base(batch_td)
+            output = self.actor_rollout_wg.infer_actor_batch(batch_td)
         else:
-            output = self.ref_policy_wg.compute_dpo_ref_noise_pred(batch_td)
+            output = self.ref_policy_wg.infer_ref_batch(batch_td)
         if output is None:
             return None
-        return DataProto.from_tensordict(output)
+
+        noise_pred = tu.get(output, "noise_pred")
+        if noise_pred.ndim >= 2 and noise_pred.shape[1] == 1:
+            noise_pred = noise_pred[:, 0]
+        noise = tu.get(output, "noise")
+        if noise.ndim >= 2 and noise.shape[1] == 1:
+            noise = noise[:, 0]
+        timesteps = tu.get(output, "timesteps")
+        if timesteps.ndim >= 2 and timesteps.shape[1] == 1:
+            timesteps = timesteps[:, 0]
+        ref_output = {
+            "ref_noise_pred": noise_pred.float(),
+            "noise": noise.float(),
+            "timesteps": timesteps.float(),
+        }
+        return DataProto.from_tensordict(tu.get_tensordict(ref_output))
 
     def fit(self):
         """
@@ -1351,10 +1346,9 @@ class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
                             batch.non_tensor_batch.update({k: np.array(v) for k, v in reward_extra_infos_dict.items()})
 
                     batch.batch["sample_level_rewards"] = batch.batch["sample_level_scores"]
-                    batch = self._materialize_dpo_flow_batch(batch)
                     if self.use_reference_policy:
                         with marked_timer(str(Role.RefPolicy), timing_raw, color="olive"):
-                            ref_dpo = self._compute_dpo_ref_noise_pred(batch)
+                            ref_dpo = self._compute_ref_noise_pred(batch)
                             if ref_dpo is not None:
                                 batch = batch.union(ref_dpo)
                     # update actor

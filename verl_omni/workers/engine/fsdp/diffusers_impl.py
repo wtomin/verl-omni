@@ -59,7 +59,12 @@ from verl.workers.engine.base import BaseEngine, BaseEngineCtx, EngineRegistry
 from verl.workers.engine.fsdp.utils import create_device_mesh, get_sharding_strategy
 from verl.workers.engine.utils import enable_full_determinism, prepare_micro_batches
 
-from verl_omni.pipelines.utils import build_scheduler, forward_and_sample_previous_step, prepare_model_inputs
+from verl_omni.pipelines.utils import (
+    build_scheduler,
+    forward_and_sample_previous_step,
+    prepare_model_inputs,
+    prepare_noisy_latents,
+)
 from verl_omni.utils.fsdp_utils import collect_lora_params
 from verl_omni.workers.config import DiffusionModelConfig
 
@@ -877,45 +882,21 @@ class PPODiffusersFSDPEngine(DiffusersFSDPEngine):
 class DPODiffusersFSDPEngine(DiffusersFSDPEngine):
     """Diffusers FSDP engine variant for diffusion DPO."""
 
-    def _prepare_dpo_noisy_latents(self, micro_batch: TensorDict) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def _prepare_noisy_latents(self, micro_batch: TensorDict) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         latents = micro_batch.get("image_latents", None)
         if latents is None:
             raise KeyError("Diffusion DPO training requires `image_latents` in the micro batch.")
 
-        noise = micro_batch.get("dpo_noise", None)
-        timesteps = micro_batch.get("dpo_timesteps", None)
-        if (noise is None) != (timesteps is None):
-            raise KeyError("Diffusion DPO requires `dpo_noise` and `dpo_timesteps` to be materialized together.")
-
-        if noise is None:
-            noise = torch.randn_like(latents)
-            timestep_indices = torch.randint(
-                0,
-                len(self.scheduler.timesteps),
-                (latents.shape[0],),
-                device=latents.device,
-            )
-            timesteps = self.scheduler.timesteps.to(device=latents.device)[timestep_indices]
-        else:
-            noise = noise.to(device=latents.device, dtype=latents.dtype)
-            timesteps = timesteps.to(device=latents.device)
-
-        if hasattr(self.scheduler, "scale_noise"):
-            noisy_latents = self.scheduler.scale_noise(latents, timesteps, noise)
-        else:
-            scheduler_timesteps = self.scheduler.timesteps.to(device=latents.device)
-            timestep_indices = (scheduler_timesteps[None, :] - timesteps[:, None]).abs().argmin(dim=1)
-            sigmas = self.scheduler.sigmas.to(device=latents.device, dtype=latents.dtype)[timestep_indices]
-            sigmas = sigmas.view(-1, *([1] * (latents.ndim - 1)))
-            noisy_latents = (1.0 - sigmas) * latents + sigmas * noise
-
-        return noisy_latents, noise, timesteps
-
-    def materialize_dpo_flow_batch(self, data: TensorDict) -> None:
-        """Sample shared DPO flow tensors before actor/ref forward passes."""
-        _, noise, timesteps = self._prepare_dpo_noisy_latents(data)
-        data["dpo_noise"] = noise
-        data["dpo_timesteps"] = timesteps
+        return prepare_noisy_latents(
+            latents=latents,
+            scheduler=self.scheduler,
+            noise=micro_batch.get(
+                "noise", None
+            ),  # if noise is not provided, sample noise and timesteps in the forward step
+            timesteps=micro_batch.get(
+                "timesteps", None
+            ),  # if timesteps is not provided, sample timesteps in the forward step
+        )
 
     @staticmethod
     def _unpad_nested_embeds(
@@ -983,13 +964,7 @@ class DPODiffusersFSDPEngine(DiffusersFSDPEngine):
     def prepare_model_inputs(self, micro_batch: TensorDict, step: int):
         del step
 
-        if micro_batch.get("dpo_noise", None) is None or micro_batch.get("dpo_timesteps", None) is None:
-            raise KeyError(
-                "Diffusion DPO forward requires pre-materialized `dpo_noise` and `dpo_timesteps`; "
-                "call `materialize_dpo_flow_batch` before actor/reference forward."
-            )
-
-        noisy_latents, noise, timesteps = self._prepare_dpo_noisy_latents(micro_batch)
+        noisy_latents, noise, timesteps = self._prepare_noisy_latents(micro_batch)
         latent = micro_batch["image_latents"].to(device=noise.device, dtype=noise.dtype)
         prompt_embeds = micro_batch["prompt_embeds"]
         prompt_embeds_mask = micro_batch.get("prompt_embeds_mask", None)
