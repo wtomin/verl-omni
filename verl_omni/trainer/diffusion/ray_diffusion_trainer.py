@@ -1194,11 +1194,15 @@ class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
         )  # direct preference has a pair per prompt
         ppo_epochs = self.config.actor_rollout_ref.actor.ppo_epochs
         seed = self.config.actor_rollout_ref.actor.data_loader_seed
-        if self.config.actor_rollout_ref.actor.shuffle:
-            sys_logger.warning("Shuffle is not supported for direct preference. Setting shuffle to False.")
+        shuffle = self.config.actor_rollout_ref.actor.shuffle
+        if shuffle:
+            sys_logger.warning(
+                "Shuffle is not supported for direct preference during actor update."
+                "This is to prevent the chosen/rejected pairs from being split across different micro batches."
+                "Setting shuffle to False."
+            )
             shuffle = False
-        else:
-            shuffle = self.config.actor_rollout_ref.actor.shuffle
+
         tu.assign_non_tensor(
             batch_td,
             global_batch_size=ppo_mini_batch_size,
