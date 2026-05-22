@@ -36,12 +36,14 @@ def embeds_padding_2_no_padding(data: TensorDict) -> TensorDict:
         masks leave the full embedding sequence intact.
     """
 
-    def _embeds_to_nested(embeds: torch.Tensor):
-        """Return a nested tensor that keeps the full sequence for every sample."""
-        return torch.nested.as_nested_tensor([embeds[i] for i in range(embeds.shape[0])], layout=torch.jagged)
+    def _to_nested(embeds: torch.Tensor, mask: torch.Tensor | None):
+        """Strip padding from (bs, seq_len, dim) embeds and return nested tensors."""
+        if mask is None:
+            return (
+                torch.nested.as_nested_tensor([embeds[i] for i in range(embeds.shape[0])], layout=torch.jagged),
+                None,
+            )
 
-    def _to_nested(embeds: torch.Tensor, mask: torch.Tensor):
-        """Strip padding from (bs, seq_len, dim) embeds using the boolean mask and return nested tensors."""
         embeds_list, mask_list = [], []
         for i in range(mask.shape[0]):
             curr_mask = mask[i].bool()
@@ -53,21 +55,15 @@ def embeds_padding_2_no_padding(data: TensorDict) -> TensorDict:
         )
 
     prompt_embeds = data.get("prompt_embeds", None)
-    prompt_embeds_mask = data.get("prompt_embeds_mask", None)
     if isinstance(prompt_embeds, torch.Tensor):
-        if isinstance(prompt_embeds_mask, torch.Tensor):
-            data["prompt_embeds"], data["prompt_embeds_mask"] = _to_nested(prompt_embeds, prompt_embeds_mask)
-        else:
-            data["prompt_embeds"] = _embeds_to_nested(prompt_embeds)
+        prompt_embeds_mask = data.get("prompt_embeds_mask", None)
+        data["prompt_embeds"], data["prompt_embeds_mask"] = _to_nested(prompt_embeds, prompt_embeds_mask)
 
     negative_prompt_embeds = data.get("negative_prompt_embeds", None)
-    negative_prompt_embeds_mask = data.get("negative_prompt_embeds_mask", None)
     if isinstance(negative_prompt_embeds, torch.Tensor):
-        if isinstance(negative_prompt_embeds_mask, torch.Tensor):
-            data["negative_prompt_embeds"], data["negative_prompt_embeds_mask"] = _to_nested(
-                negative_prompt_embeds, negative_prompt_embeds_mask
-            )
-        else:
-            data["negative_prompt_embeds"] = _embeds_to_nested(negative_prompt_embeds)
+        negative_prompt_embeds_mask = data.get("negative_prompt_embeds_mask", None)
+        data["negative_prompt_embeds"], data["negative_prompt_embeds_mask"] = _to_nested(
+            negative_prompt_embeds, negative_prompt_embeds_mask
+        )
 
     return data
