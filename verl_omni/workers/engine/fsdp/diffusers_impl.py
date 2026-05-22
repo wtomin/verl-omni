@@ -469,6 +469,41 @@ class DiffusersFSDPEngine(BaseEngine, ABC):
     def get_context_parallel_group(self):
         raise NotImplementedError
 
+    def postprocess_batch_func(self, output_lst, indices, data: TensorDict):
+        model_output = {}
+        losses = []
+        aggregated_metrics = {}
+
+        for output in output_lst:
+            # model output list
+            model_output_lst = {}
+            if "model_output" in output:
+                for model_output_dict in output["model_output"]:
+                    for key, val in model_output_dict.items():
+                        model_output_lst.setdefault(key, []).append(val)
+                for key, val in model_output_lst.items():
+                    model_output.setdefault(key, []).append(torch.stack(val, dim=1))  # (bsz, steps, ...)
+            # loss
+            if "loss" in output:
+                losses.append(output["loss"])
+
+            # metrics
+            if "metrics" in output:
+                for metrics in output["metrics"]:
+                    append_to_dict(aggregated_metrics, metrics)
+
+        # concat results from micro batches
+        for key, val in model_output.items():
+            model_output[key] = torch.concat(val, dim=0)  # (global_bsz, steps, ...)
+
+        output = {
+            "model_output": model_output,  # a dict of tensors in shape (global_bsz, steps, ...)
+            "loss": losses,  # micro-batch step-wise losses
+            "metrics": aggregated_metrics,
+        }
+
+        return output
+
     @abstractmethod
     def forward_backward_batch(
         self, data: TensorDict, loss_function: Callable, forward_only: bool = False
@@ -710,41 +745,6 @@ class PPODiffusersFSDPEngine(DiffusersFSDPEngine):
 
         # postprocess and return
         return self.postprocess_batch_func(output_lst=output_lst, indices=indices, data=data)
-
-    def postprocess_batch_func(self, output_lst, indices, data: TensorDict):
-        model_output = {}
-        losses = []
-        aggregated_metrics = {}
-
-        for output in output_lst:
-            # model output list
-            model_output_lst = {}
-            if "model_output" in output:
-                for model_output_dict in output["model_output"]:
-                    for key, val in model_output_dict.items():
-                        model_output_lst.setdefault(key, []).append(val)
-                for key, val in model_output_lst.items():
-                    model_output.setdefault(key, []).append(torch.stack(val, dim=1))  # (bsz, steps, ...)
-            # loss
-            if "loss" in output:
-                losses.append(output["loss"])
-
-            # metrics
-            if "metrics" in output:
-                for metrics in output["metrics"]:
-                    append_to_dict(aggregated_metrics, metrics)
-
-        # concat results from micro batches
-        for key, val in model_output.items():
-            model_output[key] = torch.concat(val, dim=0)  # (global_bsz, steps, ...)
-
-        output = {
-            "model_output": model_output,  # a dict of tensors in shape (global_bsz, steps, ...)
-            "loss": losses,  # micro-batch step-wise losses
-            "metrics": aggregated_metrics,
-        }
-
-        return output
 
     @staticmethod
     def _unpad_nested_embeds(embeds: torch.Tensor, mask: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
