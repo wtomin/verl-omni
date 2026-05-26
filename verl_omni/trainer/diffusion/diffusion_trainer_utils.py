@@ -20,7 +20,7 @@ class NoOpCheckpointManager:
     """Checkpoint-engine facade used when training does not start rollout replicas."""
 
     def update_weights(self, *args: Any, **kwargs: Any) -> None:
-        del args, kwargs
+        pass
 
     def sleep_replicas(self) -> None:
         return None
