@@ -45,7 +45,7 @@ import torch
 from PIL import Image
 
 DEFAULT_SYSTEM_PROMPT = "You are a helpful image generation assistant."
-DEFAULT_REWARD_SERVER_COMMAND = "vllm serve {model} --host {host} --port {port}"
+DEFAULT_REWARD_SERVER_COMMAND = "vllm serve {model} --host {host} --port {port} --dtype bfloat16 --enforce-eager"
 
 
 def _read_prompts_from_txt(path: Path) -> list[str]:
@@ -282,6 +282,7 @@ def _maybe_launch_reward_server(args: argparse.Namespace):
         port=args.reward_server_port,
     )
     env = os.environ.copy()
+    env.setdefault("VLLM_USE_DEEP_GEMM", "0")
     if torch.cuda.is_available():
         env["CUDA_VISIBLE_DEVICES"] = str(args.reward_gpu)
     print(
