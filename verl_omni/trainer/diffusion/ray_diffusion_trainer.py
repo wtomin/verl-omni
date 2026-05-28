@@ -59,12 +59,12 @@ from verl_omni.trainer.diffusion.diffusion_metric_utils import (
     compute_throughput_metrics_diffusion,
     compute_timing_metrics_diffusion,
 )
+from verl_omni.trainer.diffusion.diffusion_trainer_utils import NoOpCheckpointManager
 from verl_omni.trainer.diffusion.rollout_correction import (
     apply_bypass_mode_to_diffusion_batch,
     apply_rollout_correction_to_diffusion_batch,
     rollout_correction_enabled,
 )
-from verl_omni.trainer.diffusion.diffusion_trainer_utils import NoOpCheckpointManager
 from verl_omni.workers.utils.padding import embeds_padding_2_no_padding
 
 sys_logger = logging.getLogger(__name__)
@@ -1158,7 +1158,7 @@ class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
         *args,
         **kwargs,
     ):
-        super().__init__(config=config, *args, **kwargs)
+        super().__init__(config, *args, **kwargs)
         self.is_offline = config.algorithm.get("sample_source", "online") == "offline"
         # Direct-preference losses (e.g. DPO) need ref noise preds even when KL paths are disabled.
         self.use_reference_policy = need_reference_policy(self.config) or (

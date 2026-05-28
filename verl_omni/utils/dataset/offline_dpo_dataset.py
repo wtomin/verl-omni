@@ -144,7 +144,7 @@ def _tensor_from_column(value: Any, *, dtype: torch.dtype) -> torch.Tensor:
 
     if isinstance(value, torch.Tensor):
         return value.to(dtype=dtype)
-    if isinstance(value, (bytes, bytearray, memoryview)):
+    if isinstance(value, bytes | bytearray | memoryview):
         buffer = io.BytesIO(bytes(value))
         try:
             tensor = torch.load(buffer, map_location="cpu", weights_only=True)
@@ -160,7 +160,7 @@ def _tensor_from_column(value: Any, *, dtype: torch.dtype) -> torch.Tensor:
             return item
         if isinstance(item, np.ndarray):
             return [_to_nested(x) for x in item.tolist()]
-        if isinstance(item, (list, tuple)):
+        if isinstance(item, list | tuple):
             return [_to_nested(x) for x in item]
         return item
 

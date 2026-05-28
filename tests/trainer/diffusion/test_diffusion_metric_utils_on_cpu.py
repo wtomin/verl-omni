@@ -135,7 +135,6 @@ class TestComputeDataMetricsDiffusion:
 
     def test_dpo_batch_without_advantages_or_returns(self):
         """Direct-preference batches only carry scalar sample_level_rewards."""
-        batch_size = 4
         tensors = {"sample_level_rewards": torch.tensor([1.0, 0.0, 1.0, 0.0])}
         non_tensors = {"uid": np.array(["p0", "p0", "p1", "p1"], dtype=object)}
         batch = DataProto.from_dict(tensors=tensors, non_tensors=non_tensors)

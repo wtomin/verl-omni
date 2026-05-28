@@ -480,7 +480,7 @@ class DPOLoss(DiffusionLossFn):
         if isinstance(index, np.ndarray):
             flat = np.asarray(index).reshape(-1)[:n]
             return bool(np.all(flat[0::2] == flat[1::2]))
-        if isinstance(index, (list, tuple)):
+        if isinstance(index, list | tuple):
             flat = np.asarray(index, dtype=object).reshape(-1)[:n]
             return bool(np.all(flat[0::2] == flat[1::2]))
         tolist = getattr(index, "tolist", None)
@@ -489,7 +489,7 @@ class DPOLoss(DiffusionLossFn):
                 raw = tolist()
             except (RuntimeError, TypeError, ValueError):
                 raw = None
-            if raw is not None and not isinstance(raw, (str, bytes, bytearray)):
+            if raw is not None and not isinstance(raw, str | bytes | bytearray):
                 flat = np.asarray(raw, dtype=object).reshape(-1)[:n]
                 return bool(np.all(flat[0::2] == flat[1::2]))
         raise TypeError(
