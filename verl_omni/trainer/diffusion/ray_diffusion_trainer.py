@@ -1221,7 +1221,7 @@ class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
         return DataProto.from_single_dict(data={}, meta_info={"metrics": actor_output})
 
     def _compute_ref_noise_pred(self, batch: DataProto) -> Optional[DataProto]:
-        """Reference transformer output and shared flow tensors for DPO."""
+        """Reference transformer output and shared flow tensors."""
         batch_td = batch.to_tensordict()
         batch_td = embeds_padding_2_no_padding(batch_td)
         metadata = {
