@@ -82,10 +82,11 @@ class StableDiffusion3DPO(DiffusionModelBase):
 
         pooled_prompt_embeds = micro_batch.get("pooled_prompt_embeds", None)
         negative_pooled_prompt_embeds = micro_batch.get("negative_pooled_prompt_embeds", None)
+        guidance_scale = model_config.pipeline.guidance_scale
+        if guidance_scale is None:
+            guidance_scale = 1.0
         do_cfg = (
-            model_config.pipeline.guidance_scale > 1.0
-            and negative_prompt_embeds is not None
-            and negative_pooled_prompt_embeds is not None
+            guidance_scale > 1.0 and negative_prompt_embeds is not None and negative_pooled_prompt_embeds is not None
         )
 
         model_inputs = cls.build_transformer_inputs(

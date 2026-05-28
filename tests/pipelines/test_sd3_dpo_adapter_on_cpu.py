@@ -30,7 +30,7 @@ from verl_omni.workers.config.diffusion.model import DiffusionModelConfig
 from verl_omni.workers.config.diffusion.rollout import DiffusionPipelineConfig
 
 
-def _make_model_config(*, guidance_scale: float = 1.0) -> DiffusionModelConfig:
+def _make_model_config(*, guidance_scale: float | None = 1.0) -> DiffusionModelConfig:
     cfg = object.__new__(DiffusionModelConfig)
     object.__setattr__(cfg, "architecture", "StableDiffusion3Pipeline")
     object.__setattr__(cfg, "algorithm", "dpo")
@@ -109,6 +109,25 @@ class TestStableDiffusion3DPOPrepareModelInputs:
             model_inputs["pooled_projections"],
             tensors["pooled_prompt_embeds"],
         )
+
+    def test_null_guidance_scale_defaults_to_no_cfg(self):
+        tensors = _batch_tensors()
+        micro_batch = TensorDict({"pooled_prompt_embeds": tensors["pooled_prompt_embeds"]}, batch_size=2)
+
+        _, negative_model_inputs = StableDiffusion3DPO.prepare_model_inputs(
+            module=MagicMock(),
+            model_config=_make_model_config(guidance_scale=None),
+            latents=tensors["latents"],
+            timesteps=tensors["timesteps"],
+            prompt_embeds=tensors["prompt_embeds"],
+            prompt_embeds_mask=tensors["prompt_embeds_mask"],
+            negative_prompt_embeds=tensors["negative_prompt_embeds"],
+            negative_prompt_embeds_mask=tensors["negative_prompt_embeds_mask"],
+            micro_batch=micro_batch,
+            step=0,
+        )
+
+        assert negative_model_inputs is None
 
     def test_cfg_returns_negative_inputs(self):
         tensors = _batch_tensors()
