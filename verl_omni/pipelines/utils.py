@@ -104,8 +104,8 @@ def sample_noise_and_timesteps(
         device=latents.device,
     )
     pair_timesteps = scheduler.timesteps.to(device=latents.device)[timestep_indices]
-    noise = torch.cat([pair_noise, pair_noise], dim=0)
-    timesteps = torch.cat([pair_timesteps, pair_timesteps], dim=0)
+    noise = pair_noise.repeat_interleave(2, dim=0)
+    timesteps = pair_timesteps.repeat_interleave(2, dim=0)
     return noise, timesteps
 
 
@@ -131,8 +131,8 @@ def prepare_noisy_latents(
     else:
         noise = noise.to(device=latents.device, dtype=latents.dtype)
         timesteps = timesteps.to(device=latents.device)
-        _validate_adjacent_pair_values(noise, "noise")
-        _validate_adjacent_pair_values(timesteps, "timesteps")
+    _validate_adjacent_pair_values(noise, "noise")
+    _validate_adjacent_pair_values(timesteps, "timesteps")
 
     if hasattr(scheduler, "scale_noise"):
         noisy_latents = scheduler.scale_noise(latents, timesteps, noise)
