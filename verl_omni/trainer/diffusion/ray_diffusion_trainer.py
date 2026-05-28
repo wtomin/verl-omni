@@ -1329,38 +1329,14 @@ class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
                         [str(uuid.uuid4()) for _ in range(len(batch.batch))], dtype=object
                     )
                 if not is_offline:
-                    gen_batch = self._get_gen_batch(batch)
-                    # pass global_steps to trace
-                    gen_batch.meta_info["global_steps"] = self.global_steps
-                    gen_batch_output = gen_batch.repeat(
-                        repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True
-                    )
+                    raise NotImplementedError("Offline rollout is not supported for direct preference training.")
                 is_last_step = self.global_steps >= self.total_training_steps
                 with marked_timer("step", timing_raw):
                     reward_extra_infos_dict: dict[str, list] = {}
                     if is_offline:
                         reward_tensor = batch.batch["sample_level_scores"]
                     else:
-                        # generate a batch
-                        with marked_timer("gen", timing_raw, color="red"):
-                            gen_batch_output = self.async_rollout_manager.generate_sequences(gen_batch_output)
-                            self.checkpoint_manager.sleep_replicas()
-
-                            timing_raw.update(gen_batch_output.meta_info["timing"])
-                            gen_batch_output.meta_info.pop("timing", None)
-
-                        # repeat to align with repeated responses in rollout
-                        batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
-                        batch = batch.union(gen_batch_output)
-
-                        with marked_timer("reward", timing_raw, color="yellow"):
-                            # compute reward model score
-                            if self.use_rm and "rm_scores" not in batch.batch.keys():
-                                batch_reward = self._compute_reward_colocate(batch)
-                                batch = batch.union(batch_reward)
-
-                            # extract reward_tensor and reward_extra_infos_dict for training
-                            reward_tensor, reward_extra_infos_dict = extract_reward(batch)
+                        raise NotImplementedError("Offline rollout is not supported for direct preference training.")
 
                     with marked_timer("adv", timing_raw, color="brown"):
                         # we combine with rule-based rm
