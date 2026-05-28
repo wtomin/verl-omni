@@ -81,6 +81,8 @@ def diffusion_loss(config: DiffusionActorConfig, model_output, data: TensorDict,
         log_prob = model_output["log_probs"]
         old_log_prob = data["old_log_probs"]
         rc_cfg = config.rollout_correction
+        # Rollout Correction bypass mode: compute IS/RS weights per-step and
+        # stash ``rollout_is_weights`` into ``data`` before loss dispatch.
         if rc_cfg.bypass_mode:
             _apply_bypass_rc(log_prob, old_log_prob, rc_cfg, data, metrics)
 
