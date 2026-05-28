@@ -19,7 +19,6 @@ from typing import Any, Optional
 import torch
 from diffusers import FlowMatchEulerDiscreteScheduler, ModelMixin, SchedulerMixin
 from tensordict import TensorDict
-from verl.utils.device import get_device_name
 
 from verl_omni.pipelines.model_base import DiffusionModelBase
 from verl_omni.workers.config import DiffusionModelConfig
@@ -47,13 +46,18 @@ class StableDiffusion3DPO(DiffusionModelBase):
     def build_scheduler(cls, model_config: DiffusionModelConfig):
         """Build and configure the SD3 flow-matching scheduler."""
         scheduler = _build_sd3_scheduler(model_config.local_path)
-        cls.set_timesteps(scheduler, model_config, get_device_name())
         return scheduler
 
     @classmethod
     def set_timesteps(cls, scheduler: SchedulerMixin, model_config: DiffusionModelConfig, device: str):
-        """Configure scheduler timesteps for SD3."""
-        scheduler.set_timesteps(model_config.pipeline.num_inference_steps, device=device)
+        """No-op for SD3.5 DPO training.
+
+        DPO flow-matching samples timesteps from the full ``num_train_timesteps``
+        schedule (logit-normal over ~1000 steps).
+        Rollout / offline data prep use separate diffusers pipelines with their
+        own inference schedulers; they are not configured through this hook.
+        """
+        pass
 
     @classmethod
     def prepare_model_inputs(
