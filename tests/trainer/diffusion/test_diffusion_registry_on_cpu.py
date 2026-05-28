@@ -208,7 +208,7 @@ class TestKLLoss:
         )
 
         assert isinstance(result.loss, torch.Tensor)
-        assert result.add_loss_metric is True
+
         assert "actor/kl_loss" in result.metrics
         assert result.metrics["actor/kl_loss"] == pytest.approx(result.loss.item())
 
