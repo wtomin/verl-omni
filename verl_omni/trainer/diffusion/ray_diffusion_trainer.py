@@ -788,49 +788,6 @@ class BaseRayDiffusionTrainer(ABC):
         else:
             print(f"Warning: No dataloader state found at {dataloader_local_path}, will start from scratch")
 
-    def _compute_ref_log_prob(self, batch: DataProto) -> DataProto:
-        batch_td = batch.to_tensordict()
-        batch_td = embeds_padding_2_no_padding(batch_td)
-        metadata = {
-            "compute_loss": False,
-            "height": self.config.actor_rollout_ref.model.pipeline.height,
-            "width": self.config.actor_rollout_ref.model.pipeline.width,
-            "vae_scale_factor": self.config.actor_rollout_ref.model.get("vae_scale_factor", 8),
-        }
-        if self.ref_in_actor:
-            metadata["no_lora_adapter"] = True
-        tu.assign_non_tensor(batch_td, **metadata)
-        if self.ref_in_actor:
-            output = self.actor_rollout_wg.infer_actor_batch(batch_td)
-        else:
-            output = self.ref_policy_wg.infer_ref_batch(batch_td)
-        # gather output
-        log_probs = tu.get(output, "log_probs")
-        prev_sample_mean = tu.get(output, "prev_sample_mean")
-        ref_log_prob = tu.get_tensordict(
-            {"ref_log_prob": log_probs.float(), "ref_prev_sample_mean": prev_sample_mean.float()}
-        )
-        return DataProto.from_tensordict(ref_log_prob)
-
-    def _compute_old_log_prob(self, batch: DataProto):
-        batch_td = batch.to_tensordict()
-        batch_td = embeds_padding_2_no_padding(batch_td)
-        tu.assign_non_tensor(
-            batch_td,
-            compute_loss=False,
-            height=self.config.actor_rollout_ref.model.pipeline.height,
-            width=self.config.actor_rollout_ref.model.pipeline.width,
-            vae_scale_factor=self.config.actor_rollout_ref.model.get("vae_scale_factor", 8),
-        )
-        output = self.actor_rollout_wg.infer_actor_batch(batch_td)
-        log_probs = tu.get(output, "log_probs")
-        old_log_prob_dict = {"old_log_probs": log_probs.float()}
-        prev_sample_mean = tu.get(output, "prev_sample_mean")
-        if prev_sample_mean is not None:
-            old_log_prob_dict["old_prev_sample_mean"] = prev_sample_mean.float()
-        old_log_prob = tu.get_tensordict(old_log_prob_dict)
-        return DataProto.from_tensordict(old_log_prob)
-
     def _update_actor(self, batch: DataProto) -> DataProto:
         rollout_config = self.config.actor_rollout_ref.rollout
         batch.meta_info["multi_turn"] = rollout_config.multi_turn.enable
