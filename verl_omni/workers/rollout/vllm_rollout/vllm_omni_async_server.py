@@ -187,6 +187,15 @@ class vLLMOmniHttpServer(vLLMHttpServer):
     ) -> DiffusionOutput:
         """Generate sequence with token-in-image-out."""
         prompt_ids = normalize_token_ids(prompt_ids)
+        debug_generation = os.getenv("VERL_OMNI_DEBUG_GENERATION", "").lower() in {"1", "true", "yes"}
+        if debug_generation:
+            logger.info(
+                "vLLM-Omni generate request_id=%s prompt_tokens=%s negative_prompt_tokens=%s sampling_params=%s",
+                request_id,
+                len(prompt_ids),
+                len(negative_prompt_ids) if negative_prompt_ids is not None else None,
+                sampling_params,
+            )
 
         multi_modal_data = {}
         if image_data is not None:
@@ -233,8 +242,18 @@ class vLLMOmniHttpServer(vLLMHttpServer):
 
         # Get final response
         final_res: Optional[OmniRequestOutput] = None
-        async for output in generator:
-            final_res = output
+        try:
+            async for output in generator:
+                final_res = output
+        except Exception:
+            logger.exception(
+                "vLLM-Omni generate failed request_id=%s prompt_tokens=%s negative_prompt_tokens=%s sampling_params=%s",
+                request_id,
+                len(prompt_ids),
+                len(negative_prompt_ids) if negative_prompt_ids is not None else None,
+                sampling_params,
+            )
+            raise
         assert final_res is not None
 
         diffusion_output = self._to_tensor(final_res.images[0]).float() / 255.0

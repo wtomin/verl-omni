@@ -40,6 +40,38 @@ from .common import apply_true_cfg, build_img_shapes, coalesce_not_none, maybe_t
 __all__ = ["QwenImageDPOPipeline"]
 
 
+def _debug_generation_enabled() -> bool:
+    return os.getenv("VERL_OMNI_DEBUG_GENERATION", "").lower() in {"1", "true", "yes"}
+
+
+def _debug_value(value: Any) -> Any:
+    if isinstance(value, torch.Tensor):
+        return {
+            "shape": tuple(value.shape),
+            "dtype": str(value.dtype),
+            "device": str(value.device),
+        }
+    if isinstance(value, list):
+        return f"list(len={len(value)})"
+    return value
+
+
+def _debug_generation(message: str, **fields: Any) -> None:
+    if not _debug_generation_enabled():
+        return
+    formatted = " ".join(f"{key}={_debug_value(value)}" for key, value in fields.items())
+    print(f"[QwenImageDPOPipeline] {message} {formatted}", flush=True)
+
+
+def _debug_cuda_sync(stage: str) -> None:
+    if not _debug_generation_enabled() or not torch.cuda.is_available():
+        return
+    try:
+        torch.cuda.synchronize()
+    except Exception as exc:
+        raise RuntimeError(f"CUDA failure after QwenImageDPOPipeline stage: {stage}") from exc
+
+
 @VllmOmniPipelineBase.register("QwenImagePipeline", algorithm="dpo")
 class QwenImageDPOPipeline(QwenImagePipeline):
     """Rollout pipeline for Qwen-Image Diffusion-DPO (Euler ODE, no log-probs)."""
@@ -78,6 +110,19 @@ class QwenImageDPOPipeline(QwenImagePipeline):
         hidden_states = encoder_hidden_states.hidden_states[-1]
         split_hidden_states = self._extract_masked_hidden(hidden_states, attention_mask)
         split_hidden_states = [e[drop_idx:] for e in split_hidden_states]
+        kept_lengths = [e.size(0) for e in split_hidden_states]
+        _debug_generation(
+            "prompt embedding prefix drop",
+            prompt_ids=prompt_ids,
+            attention_mask=attention_mask,
+            drop_idx=drop_idx,
+            kept_lengths=kept_lengths,
+        )
+        if any(length <= 0 for length in kept_lengths):
+            raise ValueError(
+                "Qwen-Image prompt is empty after dropping the chat-template prefix: "
+                f"drop_idx={drop_idx}, kept_lengths={kept_lengths}."
+            )
         attn_mask_list = [torch.ones(e.size(0), dtype=torch.long, device=e.device) for e in split_hidden_states]
         max_seq_len = max([e.size(0) for e in split_hidden_states])
         prompt_embeds = torch.stack(
@@ -88,6 +133,7 @@ class QwenImageDPOPipeline(QwenImagePipeline):
         )
 
         prompt_embeds = prompt_embeds.to(dtype=dtype)
+        _debug_cuda_sync("encode_prompt")
 
         return prompt_embeds, encoder_attention_mask
 
@@ -135,13 +181,25 @@ class QwenImageDPOPipeline(QwenImagePipeline):
     ):
         """Run the full Euler denoise loop and return final latents."""
         self.scheduler.set_begin_index(0)
-        for timestep_value in timesteps:
+        for step_idx, timestep_value in enumerate(timesteps):
             if self.interrupt:
                 continue
 
             self._current_timestep = timestep_value
             timestep = timestep_value.expand(latents.shape[0]).to(device=latents.device, dtype=latents.dtype)
             x = latents.to(self.transformer.img_in.weight.dtype)
+            _debug_generation(
+                "denoise step start",
+                step_idx=step_idx,
+                timestep=timestep_value,
+                latents=latents,
+                x=x,
+                prompt_embeds=prompt_embeds,
+                prompt_embeds_mask=prompt_embeds_mask,
+                img_shapes=img_shapes,
+                txt_seq_lens=txt_seq_lens,
+                do_true_cfg=do_true_cfg,
+            )
 
             self.transformer.do_true_cfg = do_true_cfg
             noise_pred = self.transformer(
@@ -155,6 +213,7 @@ class QwenImageDPOPipeline(QwenImagePipeline):
                 attention_kwargs=self.attention_kwargs,
                 return_dict=False,
             )[0]
+            _debug_cuda_sync(f"transformer_positive_step_{step_idx}")
             if do_true_cfg:
                 neg_noise_pred = self.transformer(
                     hidden_states=x,
@@ -167,7 +226,9 @@ class QwenImageDPOPipeline(QwenImagePipeline):
                     attention_kwargs=self.attention_kwargs,
                     return_dict=False,
                 )[0]
+                _debug_cuda_sync(f"transformer_negative_step_{step_idx}")
                 noise_pred = apply_true_cfg(noise_pred, neg_noise_pred, true_cfg_scale)
+                _debug_cuda_sync(f"true_cfg_step_{step_idx}")
 
             step_output = self.scheduler.step(
                 noise_pred.float(),
@@ -177,6 +238,7 @@ class QwenImageDPOPipeline(QwenImagePipeline):
                 return_dict=False,
             )
             latents = step_output[0] if isinstance(step_output, tuple) else step_output
+            _debug_cuda_sync(f"scheduler_step_{step_idx}")
 
         return latents
 
@@ -250,6 +312,20 @@ class QwenImageDPOPipeline(QwenImagePipeline):
             negative_prompt_embeds is not None and negative_prompt_embeds_mask is not None
         )
         do_true_cfg = true_cfg_scale > 1 and has_neg_prompt
+        _debug_generation(
+            "forward inputs",
+            prompt_ids=prompt_ids,
+            negative_prompt_ids=negative_prompt_ids,
+            height=height,
+            width=width,
+            num_inference_steps=num_inference_steps,
+            max_sequence_length=max_sequence_length,
+            true_cfg_scale=true_cfg_scale,
+            guidance_scale=guidance_scale,
+            batch_size=batch_size,
+            num_images_per_prompt=num_images_per_prompt,
+            do_true_cfg=do_true_cfg,
+        )
 
         prompt_embeds, prompt_embeds_mask = self.encode_prompt(
             prompt_ids=prompt_ids,
@@ -271,6 +347,13 @@ class QwenImageDPOPipeline(QwenImagePipeline):
         else:
             negative_prompt_embeds = None
             negative_prompt_embeds_mask = None
+        _debug_generation(
+            "encoded prompts",
+            prompt_embeds=prompt_embeds,
+            prompt_embeds_mask=prompt_embeds_mask,
+            negative_prompt_embeds=negative_prompt_embeds,
+            negative_prompt_embeds_mask=negative_prompt_embeds_mask,
+        )
 
         num_channels_latents = self.transformer.in_channels // 4
         latents = self.prepare_latents(
@@ -283,9 +366,17 @@ class QwenImageDPOPipeline(QwenImagePipeline):
             generator,
             latents,
         )
+        _debug_cuda_sync("prepare_latents")
         img_shapes = build_img_shapes(height, width, batch_size, self.vae_scale_factor)
         timesteps, num_inference_steps = self.prepare_timesteps(num_inference_steps, sigmas, latents.shape[1])
         self._num_timesteps = len(timesteps)
+        _debug_generation(
+            "prepared diffusion inputs",
+            latents=latents,
+            img_shapes=img_shapes,
+            timesteps=timesteps,
+            num_inference_steps=num_inference_steps,
+        )
 
         if self.transformer.guidance_embeds:
             guidance = torch.full([1], guidance_scale, dtype=torch.float32)
@@ -300,6 +391,7 @@ class QwenImageDPOPipeline(QwenImagePipeline):
         negative_txt_seq_lens = (
             negative_prompt_embeds_mask.sum(dim=1).tolist() if negative_prompt_embeds_mask is not None else None
         )
+        _debug_generation("sequence lengths", txt_seq_lens=txt_seq_lens, negative_txt_seq_lens=negative_txt_seq_lens)
 
         latents = self.diffuse(
             prompt_embeds,
@@ -324,6 +416,7 @@ class QwenImageDPOPipeline(QwenImagePipeline):
         else:
             latents = self._unpack_latents(latents, height, width, self.vae_scale_factor)
             latents = latents.to(self.vae.dtype)
+            _debug_generation("vae decode inputs", latents=latents)
             latents_mean = (
                 torch.tensor(self.vae.config.latents_mean)
                 .view(1, self.vae.config.z_dim, 1, 1, 1)
@@ -334,6 +427,7 @@ class QwenImageDPOPipeline(QwenImagePipeline):
             )
             latents = latents / latents_std + latents_mean
             image = self.vae.decode(latents, return_dict=False)[0][:, :, 0]
+            _debug_cuda_sync("vae_decode")
 
         return DiffusionOutput(
             output=maybe_to_cpu(image),
