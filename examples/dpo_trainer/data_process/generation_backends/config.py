@@ -38,7 +38,10 @@ def add_generation_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--tokenizer_path",
         default=None,
-        help="Tokenizer path for vllm_omni prompt encoding (default: <model_path>/tokenizer).",
+        help=(
+            "Tokenizer path or HF repo id for vllm_omni prompt encoding. "
+            "Default: download --model_path and use its tokenizer/ subdir if present."
+        ),
     )
     parser.add_argument(
         "--custom_chat_template",

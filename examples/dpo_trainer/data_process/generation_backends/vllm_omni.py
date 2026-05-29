@@ -36,6 +36,7 @@ from transformers import AutoTokenizer
 from verl.utils.tokenizer import normalize_token_ids
 from verl.workers.rollout.replica import RolloutMode
 
+from verl_omni.utils.fs import resolve_model_local_dir
 from verl_omni.workers.rollout.replica import DiffusionOutput
 from verl_omni.workers.rollout.vllm_rollout.vllm_omni_async_server import vLLMOmniHttpServer
 
@@ -76,6 +77,15 @@ PIPELINE_VLLM_CONFIG = {
 }
 
 
+def _resolve_tokenizer_path(args: argparse.Namespace) -> str:
+    """Resolve tokenizer to a local path or valid HF repo id (not ``org/model/tokenizer``)."""
+    if args.tokenizer_path:
+        return os.path.expanduser(args.tokenizer_path)
+    local_model_dir = resolve_model_local_dir(os.path.expanduser(args.model_path))
+    tokenizer_subdir = os.path.join(local_model_dir, "tokenizer")
+    return tokenizer_subdir if os.path.isdir(tokenizer_subdir) else local_model_dir
+
+
 @dataclass(frozen=True)
 class VllmOmniBackend:
     args: argparse.Namespace
@@ -95,12 +105,7 @@ class VllmOmniBackend:
         __import__(spec["import_module"])
         tokenizer = None
         if spec["use_prompt_ids"]:
-            tokenizer_path = (
-                os.path.expanduser(args.tokenizer_path)
-                if args.tokenizer_path
-                else os.path.join(os.path.expanduser(args.model_path), "tokenizer")
-            )
-            tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
+            tokenizer = AutoTokenizer.from_pretrained(_resolve_tokenizer_path(args), trust_remote_code=True)
             if args.custom_chat_template:
                 tokenizer.chat_template = args.custom_chat_template
         return cls(
@@ -230,13 +235,11 @@ def _build_model_config(args: argparse.Namespace, spec: dict[str, Any]) -> Any:
         "pipeline": _diffusion_pipeline_cfg(args),
     }
     if args.pipeline == "qwen_image":
-        tokenizer_path = (
-            os.path.expanduser(args.tokenizer_path)
-            if args.tokenizer_path
-            else os.path.join(os.path.expanduser(args.model_path), "tokenizer")
-        )
-        model_cfg["tokenizer_path"] = tokenizer_path
-        model_cfg["custom_chat_template"] = args.custom_chat_template
+        # Let DiffusionModelConfig resolve tokenizer_path from ``path`` when unset
+        if args.tokenizer_path:
+            model_cfg["tokenizer_path"] = os.path.expanduser(args.tokenizer_path)
+        if args.custom_chat_template:
+            model_cfg["custom_chat_template"] = args.custom_chat_template
     return OmegaConf.create(model_cfg)
 
 
