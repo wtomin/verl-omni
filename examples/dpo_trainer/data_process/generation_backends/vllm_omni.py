@@ -122,11 +122,27 @@ class VllmOmniBackend:
         token_ids = self.tokenizer.apply_chat_template(messages, tokenize=True, add_generation_prompt=False)
         return normalize_token_ids(token_ids)
 
+    def _pad_token_ids(self, token_ids: list[int] | None) -> list[int] | None:
+        if token_ids is None:
+            return None
+        assert self.tokenizer is not None
+        padded = self.tokenizer.pad(
+            {"input_ids": token_ids},
+            padding="max_length",
+            max_length=self.args.generation_prompt_length,
+            return_tensors="pt",
+            return_attention_mask=False,
+        )["input_ids"]
+        if padded.dim() == 2:
+            padded = padded.squeeze(0)
+        return normalize_token_ids(padded.tolist())
+
     def prompt_ids_for_request(self, prompt: str) -> tuple[list[int] | None, list[int] | None]:
         if not self.spec["use_prompt_ids"]:
             return None, None
         negative_ids = self._tokenize(self.args.negative_prompt) if self.args.true_cfg_scale > 1.0 else None
-        return self._tokenize(prompt), negative_ids
+        prompt_ids = self._tokenize(prompt)
+        return self._pad_token_ids(prompt_ids), self._pad_token_ids(negative_ids)
 
     def _sampling_params(self, seed: int) -> dict[str, Any]:
         params = {
@@ -211,8 +227,9 @@ def _build_rollout_config(args: argparse.Namespace, spec: dict[str, Any]) -> Any
             "pipeline_model_parallel_size": 1,
             "gpu_memory_utilization": args.generation_gpu_memory_utilization,
             "max_num_batched_tokens": args.generation_max_num_batched_tokens,
-            "max_num_seqs": max(args.num_images_per_prompt, args.generation_max_num_seqs),
+            "max_num_seqs": args.generation_concurrency,
             "max_model_len": args.generation_max_model_len,
+            "prompt_length": args.generation_prompt_length,
             "dtype": args.dtype,
             "load_format": "auto",
             "enforce_eager": True,

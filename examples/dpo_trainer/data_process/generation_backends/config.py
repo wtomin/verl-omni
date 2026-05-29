@@ -54,6 +54,12 @@ def add_generation_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--generation_max_num_seqs", type=int, default=16)
     parser.add_argument("--generation_max_model_len", type=int, default=1058)
     parser.add_argument(
+        "--generation_prompt_length",
+        type=int,
+        default=None,
+        help="Padded prompt id length for vLLM-Omni generation. Default: --max_sequence_length.",
+    )
+    parser.add_argument(
         "--generation_concurrency",
         type=int,
         default=None,
@@ -71,6 +77,10 @@ def validate_generation_config(args: argparse.Namespace) -> None:
             args.generation_concurrency = args.num_images_per_prompt
         if args.generation_concurrency < 1:
             raise ValueError("--generation_concurrency must be at least 1.")
+        if args.generation_prompt_length is None:
+            args.generation_prompt_length = args.max_sequence_length
+        if args.generation_prompt_length < 1:
+            raise ValueError("--generation_prompt_length must be at least 1.")
     elif args.launch_generation_server:
         raise ValueError("--launch_generation_server is only valid with --generation_server vllm_omni.")
 
