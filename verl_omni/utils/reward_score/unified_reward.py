@@ -187,31 +187,47 @@ async def compute_score_unified_reward(
     extra_info = extra_info or {}
     caption = extra_info.get("prompt") or extra_info.get("raw_prompt") or ground_truth or ""
     frame_interval = extra_info.get("frame_interval", 1)
-    solution_image = _prepare_solution_frames(solution_image, frame_interval)
+    frames = _prepare_solution_frames(solution_image, frame_interval)
+    if isinstance(frames, torch.Tensor):
+        images = [frames[i] for i in range(frames.shape[0])]
+    else:
+        images = [frames[i] for i in range(len(frames))]
 
     model_name = model_name or DEFAULT_UNIFIED_REWARD_MODEL_PATH
     loop = get_event_loop()
+    shared_session = extra_info.get("aiohttp_session")
 
-    timeout = aiohttp.ClientTimeout(total=None)
-    async with aiohttp.ClientSession(timeout=timeout) as session:
-        frame_results = await asyncio.gather(
-            *[
-                _score_single_image(
-                    image=image,
-                    caption=caption,
-                    router_address=reward_router_address,
-                    model_name=model_name,
-                    loop=loop,
-                    session=session,
-                )
-                for image in solution_image
-            ]
+    async def _score_all(session: aiohttp.ClientSession) -> list[tuple[float, float, str]]:
+        return list(
+            await asyncio.gather(
+                *[
+                    _score_single_image(
+                        image=image,
+                        caption=caption,
+                        router_address=reward_router_address,
+                        model_name=model_name,
+                        loop=loop,
+                        session=session,
+                    )
+                    for image in images
+                ]
+            )
         )
+
+    if shared_session is not None:
+        frame_results = await _score_all(shared_session)
+    else:
+        timeout = aiohttp.ClientTimeout(total=None)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            frame_results = await _score_all(session)
+
+    if len(frame_results) == 1:
+        normalized_score, raw_score, unified_reward_response = frame_results[0]
+        return {"score": normalized_score, "raw_score": raw_score, "response": unified_reward_response}
 
     normalized_scores = [result[0] for result in frame_results]
     raw_scores = [result[1] for result in frame_results]
     unified_reward_response = frame_results[-1][2]
-
     score = sum(normalized_scores) / len(normalized_scores)
     raw_score = sum(raw_scores) / len(raw_scores)
     return {"score": score, "raw_score": raw_score, "response": unified_reward_response}

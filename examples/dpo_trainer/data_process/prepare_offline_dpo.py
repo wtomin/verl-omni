@@ -39,13 +39,19 @@ from typing import Any
 import numpy as np
 import pandas as pd
 import pyarrow as pa
-import pyarrow.parquet as pq
 import torch
+from parquet_checkpoint_utils import (
+    ChunkedParquetWriter,
+    ParquetWriterShutdownGuard,
+    load_resume_checkpoint,
+)
 from PIL import Image
 from pipeline_utils import get_pipeline_utils
 
 DEFAULT_SYSTEM_PROMPT = "You are a helpful image generation assistant."
-DEFAULT_REWARD_SERVER_COMMAND = "vllm serve {model} --host {host} --port {port} --dtype bfloat16 --enforce-eager"
+DEFAULT_REWARD_SERVER_COMMAND = (
+    "vllm serve {model} --host {host} --port {port} --dtype bfloat16 --enforce-eager --max-num-seqs {max_num_seqs}"
+)
 
 
 def _read_prompts_from_txt(path: Path) -> list[str]:
@@ -101,23 +107,42 @@ def _load_reward_fn(path: str | None, name: str | None):
     return getattr(module, name)
 
 
-async def _score_image(reward_fn, image: Image.Image, prompt: str, args: argparse.Namespace) -> float:
-    if reward_fn is None:
-        return 0.0
-    image_array = np.asarray(image).astype("float32") / 255.0
-    result = reward_fn(
-        data_source=args.data_source,
-        solution_image=image_array,
-        ground_truth=prompt,
-        extra_info={"raw_prompt": prompt, "prompt": prompt},
-        reward_router_address=args.reward_router_address,
-        model_name=args.reward_model_name,
-    )
-    if asyncio.iscoroutine(result):
-        result = await result
+def _extract_reward_score(result: Any) -> float:
     if isinstance(result, dict):
         return float(result.get("score", 0.0))
     return float(result)
+
+
+async def _score_images(
+    reward_fn,
+    images: list[Image.Image],
+    prompt: str,
+    args: argparse.Namespace,
+) -> list[float]:
+    """Score candidate images concurrently via repeated ``compute_score`` calls."""
+    if not images:
+        return []
+    if reward_fn is None:
+        return [0.0] * len(images)
+
+    import aiohttp
+
+    async def _score_one(image: Image.Image, session: aiohttp.ClientSession) -> float:
+        result = reward_fn(
+            data_source=args.data_source,
+            solution_image=np.asarray(image).astype("float32") / 255.0,
+            ground_truth=prompt,
+            extra_info={"raw_prompt": prompt, "prompt": prompt, "aiohttp_session": session},
+            reward_router_address=args.reward_router_address,
+            model_name=args.reward_model_name,
+        )
+        if asyncio.iscoroutine(result):
+            result = await result
+        return _extract_reward_score(result)
+
+    timeout = aiohttp.ClientTimeout(total=None)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        return list(await asyncio.gather(*[_score_one(image, session) for image in images]))
 
 
 def _make_generator(seed: int, device: str) -> torch.Generator:
@@ -144,97 +169,6 @@ def _wait_for_reward_server(host: str, port: int, timeout_s: int) -> None:
     raise TimeoutError(f"Reward server did not become ready at {url} within {timeout_s}s: {last_error}")
 
 
-class _ChunkedParquetWriter:
-    """Write parquet rows incrementally to bound peak memory usage."""
-
-    def __init__(self, path: Path, flush_every: int, base_table: pa.Table | None = None):
-        self.path = path
-        self.flush_every = max(1, flush_every)
-        self._chunk: list[dict[str, Any]] = []
-        self._writer: pq.ParquetWriter | None = None
-        self._base_table = base_table
-        self.row_count = base_table.num_rows if base_table is not None else 0
-
-    def __enter__(self) -> "_ChunkedParquetWriter":
-        return self
-
-    def __exit__(self, exc_type, exc, tb) -> None:
-        self.close()
-
-    def write(self, row: dict[str, Any]) -> None:
-        self._chunk.append(row)
-        self.row_count += 1
-        if len(self._chunk) >= self.flush_every:
-            self._flush()
-
-    def close(self) -> None:
-        if self._chunk:
-            self._flush()
-        if self._writer is not None:
-            self._writer.close()
-        elif self._base_table is not None:
-            # Resume run produced no new rows; keep the existing parquet untouched.
-            return
-        elif self.row_count == 0:
-            pd.DataFrame().to_parquet(self.path)
-
-    def _flush(self) -> None:
-        if not self._chunk:
-            return
-        table = pa.Table.from_pandas(pd.DataFrame(self._chunk), preserve_index=False)
-        if self._writer is None:
-            if self._base_table is not None:
-                self._writer = pq.ParquetWriter(self.path, self._base_table.schema)
-                self._writer.write_table(self._base_table)
-                self._base_table = None
-            else:
-                self._writer = pq.ParquetWriter(self.path, table.schema)
-        self._writer.write_table(table)
-        self._chunk.clear()
-
-
-def _row_prompt_index(extra_info: Any, row_idx: int) -> int:
-    if isinstance(extra_info, dict) and "index" in extra_info:
-        return int(extra_info["index"])
-    return row_idx
-
-
-def _load_resume_checkpoint(output_path: Path) -> tuple[int, pa.Table | None]:
-    """Return the next prompt index and any parquet rows to keep when resuming."""
-    if not output_path.exists() or output_path.stat().st_size == 0:
-        return 0, None
-
-    table = pq.read_table(output_path)
-    num_rows = table.num_rows
-    if num_rows == 0:
-        return 0, None
-
-    try:
-        extra_infos = table["extra_info"].to_pylist()
-    except (KeyError, OSError, pa.ArrowInvalid):
-        return num_rows, table
-
-    has_prompt_index = any(isinstance(info, dict) and "index" in info for info in extra_infos)
-    if not has_prompt_index:
-        return num_rows, table
-
-    row_indices = [_row_prompt_index(info, row_idx) for row_idx, info in enumerate(extra_infos)]
-    index_set = set(row_indices)
-    start_idx = 0
-    while start_idx in index_set:
-        start_idx += 1
-
-    keep_mask = [row_index < start_idx for row_index in row_indices]
-    if all(keep_mask):
-        return start_idx, table
-
-    kept_row_indices = [row_idx for row_idx, keep in enumerate(keep_mask) if keep]
-    removed = num_rows - len(kept_row_indices)
-    base_table = table.take(kept_row_indices) if kept_row_indices else None
-    print(f"Truncated {output_path}: removed {removed} stale row(s) with prompt index >= {start_idx} before resuming.")
-    return start_idx, base_table
-
-
 def _apply_gpu_device_defaults(args: argparse.Namespace) -> None:
     """Prefer reward on the first GPU and image gen on the second; share GPU 0 when only one is visible."""
     n = torch.cuda.device_count()
@@ -249,6 +183,23 @@ def _apply_gpu_device_defaults(args: argparse.Namespace) -> None:
         args.device = f"cuda:{args.image_gpu}" if torch.cuda.is_available() else "cpu"
 
 
+def _format_reward_server_command(args: argparse.Namespace) -> str:
+    values = {
+        "model": args.reward_model_name,
+        "host": args.reward_server_host,
+        "port": args.reward_server_port,
+        "max_num_seqs": args.num_images_per_prompt,
+    }
+    try:
+        return args.reward_server_command.format(**values)
+    except KeyError:
+        return args.reward_server_command.format(
+            model=values["model"],
+            host=values["host"],
+            port=values["port"],
+        )
+
+
 @contextmanager
 def _maybe_launch_reward_server(args: argparse.Namespace):
     if not args.launch_reward_server:
@@ -258,11 +209,7 @@ def _maybe_launch_reward_server(args: argparse.Namespace):
     if args.reward_model_name is None:
         raise ValueError("--launch_reward_server requires --reward_model_name.")
 
-    command = args.reward_server_command.format(
-        model=args.reward_model_name,
-        host=args.reward_server_host,
-        port=args.reward_server_port,
-    )
+    command = _format_reward_server_command(args)
     env = os.environ.copy()
     env.setdefault("VLLM_USE_DEEP_GEMM", "0")
     if torch.cuda.is_available():
@@ -304,7 +251,7 @@ async def _generate_split(args: argparse.Namespace, split: str) -> Path:
     resume = args.resume
     resume_base_table: pa.Table | None = None
     if resume:
-        start_idx, resume_base_table = _load_resume_checkpoint(output_path)
+        start_idx, resume_base_table = load_resume_checkpoint(output_path)
     else:
         start_idx = 0
     if start_idx >= len(prompts):
@@ -324,59 +271,65 @@ async def _generate_split(args: argparse.Namespace, split: str) -> Path:
     pipe.set_progress_bar_config(disable=args.disable_progress)
     reward_fn = _load_reward_fn(args.reward_function_path, args.reward_function_name)
 
-    with _ChunkedParquetWriter(output_path, args.parquet_flush_every, base_table=resume_base_table) as writer:
-        for prompt_idx in range(start_idx, len(prompts)):
-            prompt = prompts[prompt_idx]
-            prompt_tensors = pipeline_utils.encode_prompt_tensors(pipe, prompt, args.negative_prompt, args)
-            candidates = []
-            for sample_idx in range(args.num_images_per_prompt):
-                seed = args.seed + prompt_idx * args.num_images_per_prompt + sample_idx
-                image = pipe(
-                    **pipeline_utils.build_generate_kwargs(args, prompt, _make_generator(seed, args.device))
-                ).images[0]
-                image_path = image_dir / f"{prompt_idx:06d}_{sample_idx:02d}.png"
-                image.save(image_path)
-                score = await _score_image(reward_fn, image, prompt, args)
-                candidates.append(
+    with ChunkedParquetWriter(output_path, args.parquet_flush_every, base_table=resume_base_table) as writer:
+        with ParquetWriterShutdownGuard(writer):
+            for prompt_idx in range(start_idx, len(prompts)):
+                prompt = prompts[prompt_idx]
+                prompt_tensors = pipeline_utils.encode_prompt_tensors(pipe, prompt, args.negative_prompt, args)
+                generated: list[dict[str, Any]] = []
+                for sample_idx in range(args.num_images_per_prompt):
+                    seed = args.seed + prompt_idx * args.num_images_per_prompt + sample_idx
+                    image = pipe(
+                        **pipeline_utils.build_generate_kwargs(args, prompt, _make_generator(seed, args.device))
+                    ).images[0]
+                    image_path = image_dir / f"{prompt_idx:06d}_{sample_idx:02d}.png"
+                    image.save(image_path)
+                    generated.append({"path": str(image_path), "image": image, "seed": seed})
+
+                scores = await _score_images(reward_fn, [item["image"] for item in generated], prompt, args)
+                candidates = []
+                for item, score in zip(generated, scores, strict=True):
+                    candidates.append(
+                        {
+                            "path": item["path"],
+                            "latents": pipeline_utils.tensor_to_bytes(
+                                pipeline_utils.encode_image_latent(pipe, item["image"], args)
+                            ),
+                            "score": score,
+                            "seed": item["seed"],
+                        }
+                    )
+
+                candidates.sort(key=lambda item: item["score"], reverse=True)
+                win = candidates[0]
+                lose = candidates[-1]
+                writer.write(
                     {
-                        "path": str(image_path),
-                        "latents": pipeline_utils.tensor_to_bytes(
-                            pipeline_utils.encode_image_latent(pipe, image, args)
-                        ),
-                        "score": score,
-                        "seed": seed,
+                        "data_source": args.data_source,
+                        "pipeline": args.pipeline,
+                        "prompt": _build_messages(prompt, args.system_prompt),
+                        "negative_prompt": _build_messages(args.negative_prompt, args.system_prompt),
+                        "img_win": os.path.relpath(win["path"], output_path.parent),
+                        "img_lose": os.path.relpath(lose["path"], output_path.parent),
+                        "img_win_latents": win["latents"],
+                        "img_lose_latents": lose["latents"],
+                        **prompt_tensors,
+                        "win_score": win["score"],
+                        "lose_score": lose["score"],
+                        "reward_model": {"style": "model", "ground_truth": prompt},
+                        "extra_info": {
+                            "split": split,
+                            "index": prompt_idx,
+                            "raw_prompt": prompt,
+                            "raw_negative_prompt": args.negative_prompt,
+                            "num_candidates": len(candidates),
+                            "win_seed": win["seed"],
+                            "lose_seed": lose["seed"],
+                            "candidate_scores": [item["score"] for item in candidates],
+                        },
                     }
                 )
-
-            candidates.sort(key=lambda item: item["score"], reverse=True)
-            win = candidates[0]
-            lose = candidates[-1]
-            writer.write(
-                {
-                    "data_source": args.data_source,
-                    "pipeline": args.pipeline,
-                    "prompt": _build_messages(prompt, args.system_prompt),
-                    "negative_prompt": _build_messages(args.negative_prompt, args.system_prompt),
-                    "img_win": os.path.relpath(win["path"], output_path.parent),
-                    "img_lose": os.path.relpath(lose["path"], output_path.parent),
-                    "img_win_latents": win["latents"],
-                    "img_lose_latents": lose["latents"],
-                    **prompt_tensors,
-                    "win_score": win["score"],
-                    "lose_score": lose["score"],
-                    "reward_model": {"style": "model", "ground_truth": prompt},
-                    "extra_info": {
-                        "split": split,
-                        "index": prompt_idx,
-                        "raw_prompt": prompt,
-                        "raw_negative_prompt": args.negative_prompt,
-                        "num_candidates": len(candidates),
-                        "win_seed": win["seed"],
-                        "lose_seed": lose["seed"],
-                        "candidate_scores": [item["score"] for item in candidates],
-                    },
-                }
-            )
+                writer.commit_checkpoint()
 
     print(f"Wrote {writer.row_count} offline DPO pairs to {output_path}")
     if start_idx > 0 or resume_base_table is not None:
@@ -465,7 +418,10 @@ def main():
     parser.add_argument(
         "--reward_server_command",
         default=DEFAULT_REWARD_SERVER_COMMAND,
-        help=("Command template used with --launch_reward_server. Available placeholders: {model}, {host}, {port}."),
+        help=(
+            "Command template used with --launch_reward_server. "
+            "Available placeholders: {model}, {host}, {port}, {max_num_seqs}."
+        ),
     )
     parser.add_argument("--reward_server_startup_timeout", type=int, default=900)
     parser.add_argument("--disable_progress", action="store_true")
