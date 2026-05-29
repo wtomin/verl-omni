@@ -315,9 +315,6 @@ async def _generate_split(args: argparse.Namespace, split: str) -> Path:
                     candidates.append(
                         {
                             "image": item["image"],
-                            "latents": pipeline_utils.tensor_to_bytes(
-                                pipeline_utils.encode_image_latent(pipe, item["image"], args)
-                            ),
                             "score": score,
                             "seed": item["seed"],
                         }
@@ -332,6 +329,12 @@ async def _generate_split(args: argparse.Namespace, split: str) -> Path:
                 lose["image"].save(lose_path)
                 win["path"] = str(win_path)
                 lose["path"] = str(lose_path)
+                win_latents = pipeline_utils.tensor_to_bytes(
+                    pipeline_utils.encode_image_latent(pipe, win["image"], args)
+                )
+                lose_latents = pipeline_utils.tensor_to_bytes(
+                    pipeline_utils.encode_image_latent(pipe, lose["image"], args)
+                )
                 score_diff = win["score"] - lose["score"]
                 print(
                     f"  reward scores: win={win['score']:.4f}, reject={lose['score']:.4f}, "
@@ -345,8 +348,8 @@ async def _generate_split(args: argparse.Namespace, split: str) -> Path:
                         "negative_prompt": _build_messages(args.negative_prompt, args.system_prompt),
                         "img_win": os.path.relpath(win["path"], output_path.parent),
                         "img_lose": os.path.relpath(lose["path"], output_path.parent),
-                        "img_win_latents": win["latents"],
-                        "img_lose_latents": lose["latents"],
+                        "img_win_latents": win_latents,
+                        "img_lose_latents": lose_latents,
                         **prompt_tensors,
                         "win_score": win["score"],
                         "lose_score": lose["score"],
