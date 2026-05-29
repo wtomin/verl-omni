@@ -26,6 +26,26 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+# Serialized tensor blobs; keep as object columns so pandas/pyarrow do not infer null-only dtypes.
+_DPO_BLOB_COLUMNS = (
+    "prompt_embeds",
+    "prompt_embeds_mask",
+    "negative_prompt_embeds",
+    "negative_prompt_embeds_mask",
+    "pooled_prompt_embeds",
+    "negative_pooled_prompt_embeds",
+    "img_win_latents",
+    "img_lose_latents",
+)
+
+
+def _normalize_dpo_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    for column in _DPO_BLOB_COLUMNS:
+        if column not in df.columns:
+            df[column] = None
+        df[column] = df[column].astype(object)
+    return df
+
 
 def parquet_tmp_path(path: Path) -> Path:
     return path.with_name(f"{path.name}.tmp")
@@ -67,8 +87,9 @@ class ChunkedParquetWriter:
         self._tmp_path = parquet_tmp_path(path)
         self.flush_every = max(1, flush_every)
         self._chunk: list[dict[str, Any]] = []
-        self._writer: pq.ParquetWriter | None = None
-        self._base_table = base_table
+        self._pending_df: pd.DataFrame | None = (
+            _normalize_dpo_dataframe(base_table.to_pandas()) if base_table is not None else None
+        )
         self.row_count = base_table.num_rows if base_table is not None else 0
         self._closed = False
         self._dirty = False
@@ -97,46 +118,40 @@ class ChunkedParquetWriter:
         if self._closed:
             return
         self._closed = True
-        if self._dirty or self._writer is not None or self._chunk:
+        if self._dirty or self._chunk:
             self._finalize_to_disk(announce=False)
         elif self.row_count == 0 and not self.path.exists():
             pd.DataFrame().to_parquet(self._tmp_path)
             os.replace(self._tmp_path, self.path)
 
-    def _finalize_to_disk(self, *, announce: bool) -> None:
-        if self._chunk:
-            self._flush()
-        if self._writer is not None:
-            self._writer.close()
-            self._writer = None
-            os.replace(self._tmp_path, self.path)
-            self._base_table = pq.read_table(self.path)
-            self._dirty = False
-            if announce:
-                print(f"Checkpoint saved: {self.row_count} rows in {self.path}", flush=True)
-            return
-
-        if self._base_table is not None and not self._dirty:
-            return
-
-        if self.row_count == 0 and not self.path.exists():
-            pd.DataFrame().to_parquet(self._tmp_path)
-            os.replace(self._tmp_path, self.path)
-            self._dirty = False
+    def _load_existing_dataframe(self) -> pd.DataFrame | None:
+        if self._pending_df is not None:
+            existing = self._pending_df
+            self._pending_df = None
+            return existing
+        if self.path.exists() and self.path.stat().st_size > 0:
+            return _normalize_dpo_dataframe(pd.read_parquet(self.path))
+        return None
 
     def _flush(self) -> None:
         if not self._chunk:
             return
-        table = pa.Table.from_pandas(pd.DataFrame(self._chunk), preserve_index=False)
-        if self._writer is None:
-            if self._base_table is not None:
-                self._writer = pq.ParquetWriter(self._tmp_path, self._base_table.schema)
-                self._writer.write_table(self._base_table)
-                self._base_table = None
-            else:
-                self._writer = pq.ParquetWriter(self._tmp_path, table.schema)
-        self._writer.write_table(table)
+        new_df = _normalize_dpo_dataframe(pd.DataFrame(self._chunk))
+        existing_df = self._load_existing_dataframe()
+        if existing_df is not None:
+            combined = pd.concat([existing_df, new_df], ignore_index=True)
+        else:
+            combined = new_df
+        combined.to_parquet(self._tmp_path, index=False)
+        os.replace(self._tmp_path, self.path)
         self._chunk.clear()
+
+    def _finalize_to_disk(self, *, announce: bool) -> None:
+        if self._chunk:
+            self._flush()
+        self._dirty = False
+        if announce and self.row_count > 0:
+            print(f"Checkpoint saved: {self.row_count} rows in {self.path}", flush=True)
 
 
 def _shutdown_signals() -> list[int]:
