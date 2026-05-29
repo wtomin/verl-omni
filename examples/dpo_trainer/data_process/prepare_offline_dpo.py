@@ -147,12 +147,16 @@ def _wait_for_reward_server(host: str, port: int, timeout_s: int) -> None:
 class _ChunkedParquetWriter:
     """Write parquet rows incrementally to bound peak memory usage."""
 
-    def __init__(self, path: Path, flush_every: int):
+    def __init__(self, path: Path, flush_every: int, resume: bool = False):
         self.path = path
         self.flush_every = max(1, flush_every)
         self._chunk: list[dict[str, Any]] = []
         self._writer: pq.ParquetWriter | None = None
+        self._base_table: pa.Table | None = None
         self.row_count = 0
+        if resume and path.exists() and path.stat().st_size > 0:
+            self._base_table = pq.read_table(path)
+            self.row_count = self._base_table.num_rows
 
     def __enter__(self) -> "_ChunkedParquetWriter":
         return self
@@ -171,6 +175,9 @@ class _ChunkedParquetWriter:
             self._flush()
         if self._writer is not None:
             self._writer.close()
+        elif self._base_table is not None:
+            # Resume run produced no new rows; keep the existing parquet untouched.
+            return
         elif self.row_count == 0:
             pd.DataFrame().to_parquet(self.path)
 
@@ -179,9 +186,44 @@ class _ChunkedParquetWriter:
             return
         table = pa.Table.from_pandas(pd.DataFrame(self._chunk), preserve_index=False)
         if self._writer is None:
-            self._writer = pq.ParquetWriter(self.path, table.schema)
+            if self._base_table is not None:
+                self._writer = pq.ParquetWriter(self.path, self._base_table.schema)
+                self._writer.write_table(self._base_table)
+                self._base_table = None
+            else:
+                self._writer = pq.ParquetWriter(self.path, table.schema)
         self._writer.write_table(table)
         self._chunk.clear()
+
+
+def _get_resume_start_index(output_path: Path) -> int:
+    """Return the next prompt index to process from an existing parquet checkpoint."""
+    if not output_path.exists() or output_path.stat().st_size == 0:
+        return 0
+
+    num_rows = pq.read_metadata(output_path).num_rows
+    if num_rows == 0:
+        return 0
+
+    try:
+        extra_info_column = pq.read_table(output_path, columns=["extra_info"])["extra_info"]
+        indices = [
+            int(extra_info["index"])
+            for extra_info in extra_info_column.to_pylist()
+            if isinstance(extra_info, dict) and "index" in extra_info
+        ]
+        if indices:
+            start_idx = max(indices) + 1
+            if start_idx != num_rows:
+                print(
+                    f"Warning: parquet has {num_rows} rows but max extra_info.index is {max(indices)}; "
+                    f"resuming from prompt index {start_idx}."
+                )
+            return start_idx
+    except (KeyError, OSError, pa.ArrowInvalid, TypeError, ValueError):
+        pass
+
+    return num_rows
 
 
 def _apply_gpu_device_defaults(args: argparse.Namespace) -> None:
@@ -250,27 +292,32 @@ async def _generate_split(args: argparse.Namespace, split: str) -> Path:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     image_dir.mkdir(parents=True, exist_ok=True)
 
+    resume = args.resume
+    start_idx = _get_resume_start_index(output_path) if resume else 0
+    if start_idx >= len(prompts):
+        print(
+            f"Output parquet {output_path} already contains {start_idx} rows; "
+            f"nothing left to process ({len(prompts)} prompts requested)."
+        )
+        return output_path
+    if start_idx > 0:
+        print(f"Resuming from prompt index {start_idx}/{len(prompts)} ({start_idx} rows already in {output_path}).")
+
     dtype = {"float16": torch.float16, "bfloat16": torch.bfloat16, "float32": torch.float32}[args.dtype]
     pipe = pipeline_utils.load_pipeline(args, dtype)
     pipe.to(args.device)
     pipe.set_progress_bar_config(disable=args.disable_progress)
     reward_fn = _load_reward_fn(args.reward_function_path, args.reward_function_name)
 
-    with _ChunkedParquetWriter(output_path, args.parquet_flush_every) as writer:
-        for prompt_idx, prompt in enumerate(prompts):
-            prompt_tensors = _encode_prompt_tensors(pipe, prompt, args.negative_prompt, args)
+    with _ChunkedParquetWriter(output_path, args.parquet_flush_every, resume=resume and start_idx > 0) as writer:
+        for prompt_idx in range(start_idx, len(prompts)):
+            prompt = prompts[prompt_idx]
+            prompt_tensors = pipeline_utils.encode_prompt_tensors(pipe, prompt, args.negative_prompt, args)
             candidates = []
             for sample_idx in range(args.num_images_per_prompt):
                 seed = args.seed + prompt_idx * args.num_images_per_prompt + sample_idx
                 image = pipe(
-                    prompt=prompt,
-                    negative_prompt=args.negative_prompt,
-                    height=args.height,
-                    width=args.width,
-                    num_inference_steps=args.num_inference_steps,
-                    guidance_scale=args.guidance_scale,
-                    max_sequence_length=args.max_sequence_length,
-                    generator=_make_generator(seed, args.device),
+                    **pipeline_utils.build_generate_kwargs(args, prompt, _make_generator(seed, args.device))
                 ).images[0]
                 image_path = image_dir / f"{prompt_idx:06d}_{sample_idx:02d}.png"
                 image.save(image_path)
@@ -317,6 +364,8 @@ async def _generate_split(args: argparse.Namespace, split: str) -> Path:
             )
 
     print(f"Wrote {writer.row_count} offline DPO pairs to {output_path}")
+    if start_idx > 0:
+        print(f"Added {writer.row_count - start_idx} new rows (resumed from index {start_idx}).")
     return output_path
 
 
@@ -379,6 +428,12 @@ def main():
         type=int,
         default=32,
         help="Number of DPO rows to buffer in memory before flushing to parquet.",
+    )
+    parser.add_argument(
+        "--resume",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Resume from existing --output_file parquet when present (default: enabled).",
     )
     parser.add_argument("--reward_function_path", default=None)
     parser.add_argument("--reward_function_name", default=None)
