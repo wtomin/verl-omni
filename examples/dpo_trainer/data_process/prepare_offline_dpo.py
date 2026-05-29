@@ -154,6 +154,10 @@ def _make_generators(seeds: list[int], device: str) -> list[torch.Generator]:
     return [_make_generator(seed, device) for seed in seeds]
 
 
+def _sample_image_seeds(rng: torch.Generator, count: int) -> list[int]:
+    return [int(torch.randint(0, 2**31, (1,), generator=rng).item()) for _ in range(count)]
+
+
 def _router_url(host: str, port: int, path: str) -> str:
     return f"http://{host}:{port}{path}"
 
@@ -274,16 +278,16 @@ async def _generate_split(args: argparse.Namespace, split: str) -> Path:
     pipe.to(args.device)
     pipe.set_progress_bar_config(disable=args.disable_progress)
     reward_fn = _load_reward_fn(args.reward_function_path, args.reward_function_name)
+    seed_rng = torch.Generator().manual_seed(args.seed)
+    for _ in range(start_idx):
+        _sample_image_seeds(seed_rng, args.num_images_per_prompt)
 
     with ChunkedParquetWriter(output_path, args.parquet_flush_every, base_table=resume_base_table) as writer:
         with ParquetWriterShutdownGuard(writer):
             for prompt_idx in range(start_idx, len(prompts)):
                 prompt = prompts[prompt_idx]
                 prompt_tensors = pipeline_utils.encode_prompt_tensors(pipe, prompt, args.negative_prompt, args)
-                seeds = [
-                    args.seed + prompt_idx * args.num_images_per_prompt + sample_idx
-                    for sample_idx in range(args.num_images_per_prompt)
-                ]
+                seeds = _sample_image_seeds(seed_rng, args.num_images_per_prompt)
                 images = pipe(
                     **pipeline_utils.build_generate_kwargs(args, prompt, _make_generators(seeds, args.device))
                 ).images
@@ -368,7 +372,7 @@ def main():
     parser.add_argument("--guidance_scale", type=float, default=4.0)
     parser.add_argument("--true_cfg_scale", type=float, default=4.0, help="Qwen-Image True-CFG scale.")
     parser.add_argument("--max_sequence_length", type=int, default=256)
-    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--seed", type=int, default=42, help="Master seed for sampling independent per-image seeds.")
     parser.add_argument(
         "--device",
         default=None,
