@@ -306,17 +306,15 @@ async def _generate_split(args: argparse.Namespace, split: str) -> Path:
                     **pipeline_utils.build_generate_kwargs(args, prompt, _make_generators(seeds, args.device))
                 ).images
                 generated: list[dict[str, Any]] = []
-                for sample_idx, (image, seed) in enumerate(zip(images, seeds, strict=True)):
-                    image_path = image_dir / f"{prompt_idx:06d}_{sample_idx:02d}.png"
-                    image.save(image_path)
-                    generated.append({"path": str(image_path), "image": image, "seed": seed})
+                for image, seed in zip(images, seeds, strict=True):
+                    generated.append({"image": image, "seed": seed})
 
                 scores = await _score_images(reward_fn, [item["image"] for item in generated], prompt, args)
                 candidates = []
                 for item, score in zip(generated, scores, strict=True):
                     candidates.append(
                         {
-                            "path": item["path"],
+                            "image": item["image"],
                             "latents": pipeline_utils.tensor_to_bytes(
                                 pipeline_utils.encode_image_latent(pipe, item["image"], args)
                             ),
@@ -328,6 +326,12 @@ async def _generate_split(args: argparse.Namespace, split: str) -> Path:
                 candidates.sort(key=lambda item: item["score"], reverse=True)
                 win = candidates[0]
                 lose = candidates[-1]
+                win_path = image_dir / f"{prompt_idx:06d}_win.png"
+                lose_path = image_dir / f"{prompt_idx:06d}_lose.png"
+                win["image"].save(win_path)
+                lose["image"].save(lose_path)
+                win["path"] = str(win_path)
+                lose["path"] = str(lose_path)
                 score_diff = win["score"] - lose["score"]
                 print(
                     f"  reward scores: win={win['score']:.4f}, reject={lose['score']:.4f}, "
