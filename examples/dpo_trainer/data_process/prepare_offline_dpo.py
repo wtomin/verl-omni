@@ -150,6 +150,10 @@ def _make_generator(seed: int, device: str) -> torch.Generator:
     return torch.Generator(device=generator_device).manual_seed(seed)
 
 
+def _make_generators(seeds: list[int], device: str) -> list[torch.Generator]:
+    return [_make_generator(seed, device) for seed in seeds]
+
+
 def _router_url(host: str, port: int, path: str) -> str:
     return f"http://{host}:{port}{path}"
 
@@ -276,12 +280,15 @@ async def _generate_split(args: argparse.Namespace, split: str) -> Path:
             for prompt_idx in range(start_idx, len(prompts)):
                 prompt = prompts[prompt_idx]
                 prompt_tensors = pipeline_utils.encode_prompt_tensors(pipe, prompt, args.negative_prompt, args)
+                seeds = [
+                    args.seed + prompt_idx * args.num_images_per_prompt + sample_idx
+                    for sample_idx in range(args.num_images_per_prompt)
+                ]
+                images = pipe(
+                    **pipeline_utils.build_generate_kwargs(args, prompt, _make_generators(seeds, args.device))
+                ).images
                 generated: list[dict[str, Any]] = []
-                for sample_idx in range(args.num_images_per_prompt):
-                    seed = args.seed + prompt_idx * args.num_images_per_prompt + sample_idx
-                    image = pipe(
-                        **pipeline_utils.build_generate_kwargs(args, prompt, _make_generator(seed, args.device))
-                    ).images[0]
+                for sample_idx, (image, seed) in enumerate(zip(images, seeds, strict=True)):
                     image_path = image_dir / f"{prompt_idx:06d}_{sample_idx:02d}.png"
                     image.save(image_path)
                     generated.append({"path": str(image_path), "image": image, "seed": seed})

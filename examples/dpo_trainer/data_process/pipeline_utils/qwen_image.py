@@ -46,7 +46,9 @@ def load_pipeline(args: argparse.Namespace, dtype: torch.dtype):
     return QwenImagePipeline.from_pretrained(args.model_path, torch_dtype=dtype)
 
 
-def build_generate_kwargs(args: argparse.Namespace, prompt: str, generator: torch.Generator) -> dict:
+def build_generate_kwargs(
+    args: argparse.Namespace, prompt: str, generator: torch.Generator | list[torch.Generator]
+) -> dict:
     return {
         "prompt": prompt,
         "negative_prompt": args.negative_prompt,
@@ -56,6 +58,7 @@ def build_generate_kwargs(args: argparse.Namespace, prompt: str, generator: torc
         "guidance_scale": args.guidance_scale,
         "true_cfg_scale": args.true_cfg_scale,
         "max_sequence_length": args.max_sequence_length,
+        "num_images_per_prompt": args.num_images_per_prompt,
         "generator": generator,
     }
 

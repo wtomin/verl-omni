@@ -40,7 +40,9 @@ def load_pipeline(args: argparse.Namespace, dtype: torch.dtype):
     return StableDiffusion3Pipeline.from_pretrained(args.model_path, torch_dtype=dtype)
 
 
-def build_generate_kwargs(args: argparse.Namespace, prompt: str, generator: torch.Generator) -> dict:
+def build_generate_kwargs(
+    args: argparse.Namespace, prompt: str, generator: torch.Generator | list[torch.Generator]
+) -> dict:
     return {
         "prompt": prompt,
         "negative_prompt": args.negative_prompt,
@@ -49,6 +51,7 @@ def build_generate_kwargs(args: argparse.Namespace, prompt: str, generator: torc
         "num_inference_steps": args.num_inference_steps,
         "guidance_scale": args.guidance_scale,
         "max_sequence_length": args.max_sequence_length,
+        "num_images_per_prompt": args.num_images_per_prompt,
         "generator": generator,
     }
 
