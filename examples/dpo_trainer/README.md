@@ -26,6 +26,49 @@ The resulting parquet rows contain:
 Generate Qwen-Image offline pairs from prompt files and choose the parquet
 output paths explicitly:
 
+With the vLLM-Omni DPO rollout adapter (concurrent requests, per-image seeds, rollout
+`latents` written directly to parquet):
+
+```bash
+python3 examples/dpo_trainer/data_process/prepare_offline_dpo.py \
+  --generation_server vllm_omni \
+  --launch_generation_server \
+  --pipeline qwen_image \
+  --model_path Qwen/Qwen-Image \
+  --input_file dataset/my_prompts/train_prompts.txt \
+  --output_file data/offline_dpo_qwen_image/train.parquet \
+  --image_dir data/offline_dpo_qwen_image/images/train \
+  --num_images_per_prompt 4 \
+  --height 512 \
+  --width 512 \
+  --num_inference_steps 35 \
+  --guidance_scale 1.0 \
+  --true_cfg_scale 4.0 \
+  --reward_function_path verl_omni/utils/reward_score/unified_reward.py \
+  --reward_function_name compute_score_unified_reward \
+  --launch_reward_server \
+  --reward_server_host 127.0.0.1 \
+  --reward_server_port 8000 \
+  --reward_model_name CodeGoat24/UnifiedReward-2.0-qwen3vl-8b
+```
+
+SD3.5 with vLLM-Omni (raw prompt strings, includes ``pooled_prompt_embeds``):
+
+```bash
+python3 examples/dpo_trainer/data_process/prepare_offline_dpo.py \
+  --generation_server vllm_omni \
+  --launch_generation_server \
+  --pipeline sd3 \
+  --model_path stabilityai/stable-diffusion-3.5-medium \
+  --input_file dataset/my_prompts/train_prompts.txt \
+  --output_file data/offline_dpo_sd35/train.parquet \
+  --num_images_per_prompt 4 \
+  --guidance_scale 4.0 \
+  ...
+```
+
+Or with in-process Diffusers (default):
+
 ```bash
 python3 examples/dpo_trainer/data_process/prepare_offline_dpo.py \
   --pipeline qwen_image \
