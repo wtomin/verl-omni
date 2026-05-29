@@ -25,8 +25,9 @@ import pytest
 import torch
 from tensordict import TensorDict
 
-from verl_omni.pipelines.model_base import DiffusionModelBase
+from verl_omni.pipelines.model_base import DiffusionModelBase, VllmOmniPipelineBase
 from verl_omni.pipelines.qwen_image_dpo.diffusers_training_adapter import QwenImageDPO
+from verl_omni.pipelines.qwen_image_dpo.vllm_omni_rollout_adapter import QwenImageDPOPipeline
 from verl_omni.workers.config.diffusion.model import DiffusionModelConfig
 from verl_omni.workers.config.diffusion.rollout import DiffusionPipelineConfig
 
@@ -82,6 +83,9 @@ class TestQwenImageDPORegistry:
     def test_registered_for_qwen_image_dpo_algorithm(self):
         cfg = _make_model_config()
         assert DiffusionModelBase.get_class(cfg) is QwenImageDPO
+
+    def test_rollout_registered_for_qwen_image_dpo_algorithm(self):
+        assert VllmOmniPipelineBase.get_class("QwenImagePipeline", "dpo") is QwenImageDPOPipeline
 
 
 class TestQwenImageDPOBuildTransformerInputs:

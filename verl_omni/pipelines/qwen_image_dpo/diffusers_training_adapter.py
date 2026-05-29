@@ -24,29 +24,9 @@ from tensordict import TensorDict
 from verl_omni.pipelines.model_base import DiffusionModelBase
 from verl_omni.workers.config import DiffusionModelConfig
 
+from .common import QWEN_IMAGE_VAE_SCALE_FACTOR, apply_true_cfg, build_img_shapes
+
 __all__ = ["QwenImageDPO"]
-
-
-QWEN_IMAGE_VAE_SCALE_FACTOR = 8
-
-
-def _build_img_shapes(
-    height: int, width: int, batch_size: int, vae_scale_factor: int
-) -> list[list[tuple[int, int, int]]]:
-    latent_height = height // vae_scale_factor // 2
-    latent_width = width // vae_scale_factor // 2
-    return [[(1, latent_height, latent_width)]] * batch_size
-
-
-def _apply_true_cfg(
-    noise_pred: torch.Tensor,
-    negative_noise_pred: torch.Tensor,
-    true_cfg_scale: float,
-) -> torch.Tensor:
-    comb_pred = negative_noise_pred + true_cfg_scale * (noise_pred - negative_noise_pred)
-    cond_norm = torch.norm(noise_pred, dim=-1, keepdim=True)
-    noise_norm = torch.norm(comb_pred, dim=-1, keepdim=True)
-    return comb_pred * (cond_norm / noise_norm)
 
 
 @DiffusionModelBase.register("QwenImagePipeline", algorithm="dpo")
@@ -87,7 +67,7 @@ class QwenImageDPO(DiffusionModelBase):
         height = model_config.pipeline.height
         width = model_config.pipeline.width
         vae_scale_factor = model_config.get("vae_scale_factor", QWEN_IMAGE_VAE_SCALE_FACTOR)
-        img_shapes = _build_img_shapes(height, width, latents.shape[0], vae_scale_factor)
+        img_shapes = build_img_shapes(height, width, latents.shape[0], vae_scale_factor)
 
         guidance_scale = model_config.pipeline.guidance_scale
         if getattr(module.config, "guidance_embeds", False):
@@ -159,5 +139,5 @@ class QwenImageDPO(DiffusionModelBase):
             if negative_model_inputs is None:
                 raise ValueError("Qwen-Image DPO True-CFG requires negative prompt inputs when true_cfg_scale > 1.")
             neg_noise_pred = module(**negative_model_inputs)[0]
-            noise_pred = _apply_true_cfg(noise_pred, neg_noise_pred, true_cfg_scale)
+            noise_pred = apply_true_cfg(noise_pred, neg_noise_pred, true_cfg_scale)
         return noise_pred

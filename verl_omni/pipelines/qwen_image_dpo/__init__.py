@@ -13,5 +13,6 @@
 # limitations under the License.
 
 from .diffusers_training_adapter import QwenImageDPO
+from .vllm_omni_rollout_adapter import QwenImageDPOPipeline
 
-__all__ = ["QwenImageDPO"]
+__all__ = ["QwenImageDPO", "QwenImageDPOPipeline"]
