@@ -147,16 +147,13 @@ def _wait_for_reward_server(host: str, port: int, timeout_s: int) -> None:
 class _ChunkedParquetWriter:
     """Write parquet rows incrementally to bound peak memory usage."""
 
-    def __init__(self, path: Path, flush_every: int, resume: bool = False):
+    def __init__(self, path: Path, flush_every: int, base_table: pa.Table | None = None):
         self.path = path
         self.flush_every = max(1, flush_every)
         self._chunk: list[dict[str, Any]] = []
         self._writer: pq.ParquetWriter | None = None
-        self._base_table: pa.Table | None = None
-        self.row_count = 0
-        if resume and path.exists() and path.stat().st_size > 0:
-            self._base_table = pq.read_table(path)
-            self.row_count = self._base_table.num_rows
+        self._base_table = base_table
+        self.row_count = base_table.num_rows if base_table is not None else 0
 
     def __enter__(self) -> "_ChunkedParquetWriter":
         return self
@@ -196,34 +193,46 @@ class _ChunkedParquetWriter:
         self._chunk.clear()
 
 
-def _get_resume_start_index(output_path: Path) -> int:
-    """Return the next prompt index to process from an existing parquet checkpoint."""
-    if not output_path.exists() or output_path.stat().st_size == 0:
-        return 0
+def _row_prompt_index(extra_info: Any, row_idx: int) -> int:
+    if isinstance(extra_info, dict) and "index" in extra_info:
+        return int(extra_info["index"])
+    return row_idx
 
-    num_rows = pq.read_metadata(output_path).num_rows
+
+def _load_resume_checkpoint(output_path: Path) -> tuple[int, pa.Table | None]:
+    """Return the next prompt index and any parquet rows to keep when resuming."""
+    if not output_path.exists() or output_path.stat().st_size == 0:
+        return 0, None
+
+    table = pq.read_table(output_path)
+    num_rows = table.num_rows
     if num_rows == 0:
-        return 0
+        return 0, None
 
     try:
-        extra_info_column = pq.read_table(output_path, columns=["extra_info"])["extra_info"]
-        indices = [
-            int(extra_info["index"])
-            for extra_info in extra_info_column.to_pylist()
-            if isinstance(extra_info, dict) and "index" in extra_info
-        ]
-        if indices:
-            start_idx = max(indices) + 1
-            if start_idx != num_rows:
-                print(
-                    f"Warning: parquet has {num_rows} rows but max extra_info.index is {max(indices)}; "
-                    f"resuming from prompt index {start_idx}."
-                )
-            return start_idx
-    except (KeyError, OSError, pa.ArrowInvalid, TypeError, ValueError):
-        pass
+        extra_infos = table["extra_info"].to_pylist()
+    except (KeyError, OSError, pa.ArrowInvalid):
+        return num_rows, table
 
-    return num_rows
+    has_prompt_index = any(isinstance(info, dict) and "index" in info for info in extra_infos)
+    if not has_prompt_index:
+        return num_rows, table
+
+    row_indices = [_row_prompt_index(info, row_idx) for row_idx, info in enumerate(extra_infos)]
+    index_set = set(row_indices)
+    start_idx = 0
+    while start_idx in index_set:
+        start_idx += 1
+
+    keep_mask = [row_index < start_idx for row_index in row_indices]
+    if all(keep_mask):
+        return start_idx, table
+
+    kept_row_indices = [row_idx for row_idx, keep in enumerate(keep_mask) if keep]
+    removed = num_rows - len(kept_row_indices)
+    base_table = table.take(kept_row_indices) if kept_row_indices else None
+    print(f"Truncated {output_path}: removed {removed} stale row(s) with prompt index >= {start_idx} before resuming.")
+    return start_idx, base_table
 
 
 def _apply_gpu_device_defaults(args: argparse.Namespace) -> None:
@@ -293,15 +302,21 @@ async def _generate_split(args: argparse.Namespace, split: str) -> Path:
     image_dir.mkdir(parents=True, exist_ok=True)
 
     resume = args.resume
-    start_idx = _get_resume_start_index(output_path) if resume else 0
+    resume_base_table: pa.Table | None = None
+    if resume:
+        start_idx, resume_base_table = _load_resume_checkpoint(output_path)
+    else:
+        start_idx = 0
     if start_idx >= len(prompts):
+        kept_rows = resume_base_table.num_rows if resume_base_table is not None else start_idx
         print(
-            f"Output parquet {output_path} already contains {start_idx} rows; "
+            f"Output parquet {output_path} already contains {kept_rows} completed prompts; "
             f"nothing left to process ({len(prompts)} prompts requested)."
         )
         return output_path
-    if start_idx > 0:
-        print(f"Resuming from prompt index {start_idx}/{len(prompts)} ({start_idx} rows already in {output_path}).")
+    if start_idx > 0 or resume_base_table is not None:
+        kept_rows = resume_base_table.num_rows if resume_base_table is not None else start_idx
+        print(f"Resuming from prompt index {start_idx}/{len(prompts)} ({kept_rows} rows kept in {output_path}).")
 
     dtype = {"float16": torch.float16, "bfloat16": torch.bfloat16, "float32": torch.float32}[args.dtype]
     pipe = pipeline_utils.load_pipeline(args, dtype)
@@ -309,7 +324,7 @@ async def _generate_split(args: argparse.Namespace, split: str) -> Path:
     pipe.set_progress_bar_config(disable=args.disable_progress)
     reward_fn = _load_reward_fn(args.reward_function_path, args.reward_function_name)
 
-    with _ChunkedParquetWriter(output_path, args.parquet_flush_every, resume=resume and start_idx > 0) as writer:
+    with _ChunkedParquetWriter(output_path, args.parquet_flush_every, base_table=resume_base_table) as writer:
         for prompt_idx in range(start_idx, len(prompts)):
             prompt = prompts[prompt_idx]
             prompt_tensors = pipeline_utils.encode_prompt_tensors(pipe, prompt, args.negative_prompt, args)
@@ -364,8 +379,9 @@ async def _generate_split(args: argparse.Namespace, split: str) -> Path:
             )
 
     print(f"Wrote {writer.row_count} offline DPO pairs to {output_path}")
-    if start_idx > 0:
-        print(f"Added {writer.row_count - start_idx} new rows (resumed from index {start_idx}).")
+    if start_idx > 0 or resume_base_table is not None:
+        kept_rows = resume_base_table.num_rows if resume_base_table is not None else start_idx
+        print(f"Added {writer.row_count - kept_rows} new rows (resumed from index {start_idx}).")
     return output_path
 
 
