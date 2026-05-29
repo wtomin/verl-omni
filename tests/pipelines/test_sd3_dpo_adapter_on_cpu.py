@@ -24,8 +24,9 @@ import pytest
 import torch
 from tensordict import TensorDict
 
-from verl_omni.pipelines.model_base import DiffusionModelBase
+from verl_omni.pipelines.model_base import DiffusionModelBase, VllmOmniPipelineBase
 from verl_omni.pipelines.sd3_dpo.diffusers_training_adapter import StableDiffusion3DPO
+from verl_omni.pipelines.sd3_dpo.vllm_omni_rollout_adapter import StableDiffusion3DPOPipeline
 from verl_omni.workers.config.diffusion.model import DiffusionModelConfig
 from verl_omni.workers.config.diffusion.rollout import DiffusionPipelineConfig
 
@@ -64,6 +65,9 @@ class TestStableDiffusion3DPORegistry:
     def test_registered_for_sd3_dpo_algorithm(self):
         cfg = _make_model_config()
         assert DiffusionModelBase.get_class(cfg) is StableDiffusion3DPO
+
+    def test_rollout_registered_for_sd3_dpo_algorithm(self):
+        assert VllmOmniPipelineBase.get_class("StableDiffusion3Pipeline", "dpo") is StableDiffusion3DPOPipeline
 
 
 class TestStableDiffusion3DPOBuildTransformerInputs:

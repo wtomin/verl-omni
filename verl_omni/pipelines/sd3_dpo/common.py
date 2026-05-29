@@ -12,7 +12,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .diffusers_training_adapter import StableDiffusion3DPO
-from .vllm_omni_rollout_adapter import StableDiffusion3DPOPipeline
+import torch
 
-__all__ = ["StableDiffusion3DPO", "StableDiffusion3DPOPipeline"]
+
+def maybe_to_cpu(value):
+    if isinstance(value, torch.Tensor):
+        return value.detach().cpu()
+    return value
+
+
+def prompt_embeds_mask_from_embeds(prompt_embeds: torch.Tensor) -> torch.Tensor:
+    return torch.ones(
+        prompt_embeds.shape[0],
+        prompt_embeds.shape[1],
+        dtype=torch.int32,
+        device=prompt_embeds.device,
+    )
