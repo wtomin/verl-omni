@@ -32,7 +32,7 @@ python3 examples/dpo_trainer/data_process/prepare_offline_dpo.py \
   --input_file dataset/my_prompts/train_prompts.txt \
   --output_file data/offline_dpo_qwen_image/train.parquet \
   --image_dir data/offline_dpo_qwen_image/images/train \
-  --num_images_per_prompt 4 \
+  --num_images_per_prompt 8 \
   --height 512 \
   --width 512 \
   --num_inference_steps 35 \
@@ -50,7 +50,7 @@ python3 examples/dpo_trainer/data_process/prepare_offline_dpo.py \
   --output_file data/offline_dpo_qwen_image/test.parquet \
   --image_dir data/offline_dpo_qwen_image/images/test \
   --split test \
-  --num_images_per_prompt 4 \
+  --num_images_per_prompt 8 \
   --height 512 \
   --width 512 \
   --num_inference_steps 35 \
@@ -104,7 +104,7 @@ python3 examples/dpo_trainer/data_process/prepare_offline_dpo.py \
   --output_file data/offline_dpo_sd3/train.parquet \
   --image_dir data/offline_dpo_sd3/images/train \
   --model_path stabilityai/stable-diffusion-3.5-medium \
-  --num_images_per_prompt 4 \
+  --num_images_per_prompt 8 \
   --height 256 \
   --width 256 \
   --num_inference_steps 25 \

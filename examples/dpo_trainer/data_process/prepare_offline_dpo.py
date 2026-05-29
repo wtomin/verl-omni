@@ -50,7 +50,7 @@ from pipeline_utils import get_pipeline_utils
 
 DEFAULT_SYSTEM_PROMPT = "You are a helpful image generation assistant."
 DEFAULT_REWARD_SERVER_COMMAND = (
-    "vllm serve {model} --host {host} --port {port} --dtype bfloat16 --enforce-eager --max-num-seqs {max_num_seqs}"
+    "vllm serve {model} --host {host} --port {port} --dtype bfloat16 --max-num-seqs {max_num_seqs}"
 )
 
 
@@ -156,6 +156,12 @@ def _make_generators(seeds: list[int], device: str) -> list[torch.Generator]:
 
 def _sample_image_seeds(rng: torch.Generator, count: int) -> list[int]:
     return [int(torch.randint(0, 2**31, (1,), generator=rng).item()) for _ in range(count)]
+
+
+def _uses_classifier_free_guidance(args: argparse.Namespace) -> bool:
+    if args.pipeline == "qwen_image":
+        return args.true_cfg_scale is not None and args.true_cfg_scale > 1.0
+    return args.guidance_scale is not None and args.guidance_scale > 1.0
 
 
 def _router_url(host: str, port: int, path: str) -> str:
@@ -276,6 +282,8 @@ async def _generate_split(args: argparse.Namespace, split: str) -> Path:
     dtype = {"float16": torch.float16, "bfloat16": torch.bfloat16, "float32": torch.float32}[args.dtype]
     pipe = pipeline_utils.load_pipeline(args, dtype)
     pipe.to(args.device)
+    print("Compiling repeated blocks...")
+    pipe.transformer.compile_repeated_blocks(fullgraph=True)
     pipe.set_progress_bar_config(disable=args.disable_progress)
     reward_fn = _load_reward_fn(args.reward_function_path, args.reward_function_name)
     seed_rng = torch.Generator().manual_seed(args.seed)
@@ -286,6 +294,12 @@ async def _generate_split(args: argparse.Namespace, split: str) -> Path:
         with ParquetWriterShutdownGuard(writer):
             for prompt_idx in range(start_idx, len(prompts)):
                 prompt = prompts[prompt_idx]
+                print(
+                    f"[{prompt_idx + 1}/{len(prompts)}] Generating {args.num_images_per_prompt} images "
+                    f"for prompt: {prompt!r}"
+                )
+                if _uses_classifier_free_guidance(args):
+                    print(f"  negative_prompt: {args.negative_prompt!r}")
                 prompt_tensors = pipeline_utils.encode_prompt_tensors(pipe, prompt, args.negative_prompt, args)
                 seeds = _sample_image_seeds(seed_rng, args.num_images_per_prompt)
                 images = pipe(
@@ -314,6 +328,11 @@ async def _generate_split(args: argparse.Namespace, split: str) -> Path:
                 candidates.sort(key=lambda item: item["score"], reverse=True)
                 win = candidates[0]
                 lose = candidates[-1]
+                score_diff = win["score"] - lose["score"]
+                print(
+                    f"  reward scores: win={win['score']:.4f}, reject={lose['score']:.4f}, "
+                    f"diff(win-reject)={score_diff:.4f}"
+                )
                 writer.write(
                     {
                         "data_source": args.data_source,
