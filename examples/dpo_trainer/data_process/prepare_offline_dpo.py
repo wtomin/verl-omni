@@ -49,6 +49,10 @@ from PIL import Image
 from pipeline_utils import get_pipeline_utils
 
 DEFAULT_SYSTEM_PROMPT = "You are a helpful image generation assistant."
+DEFAULT_NEGATIVE_PROMPT = (
+    "low quality, blurry, distorted, deformed, ugly, bad anatomy, bad proportions, "
+    "watermark, text, logo, jpeg artifacts"
+)
 DEFAULT_REWARD_SERVER_COMMAND = (
     "vllm serve {model} --host {host} --port {port} --dtype bfloat16 --max-num-seqs {max_num_seqs}"
 )
@@ -162,6 +166,17 @@ def _uses_classifier_free_guidance(args: argparse.Namespace) -> bool:
     if args.pipeline == "qwen_image":
         return args.true_cfg_scale is not None and args.true_cfg_scale > 1.0
     return args.guidance_scale is not None and args.guidance_scale > 1.0
+
+
+def _next_prompt_cfg(args: argparse.Namespace, rng: torch.Generator) -> tuple[str, argparse.Namespace]:
+    drop = args.random_drop_negative_prompt and float(torch.rand(1, generator=rng).item()) < 0.5
+    if not drop:
+        return args.negative_prompt, args
+    prompt_args = argparse.Namespace(**vars(args))
+    prompt_args.negative_prompt = ""
+    scale_key = "true_cfg_scale" if args.pipeline == "qwen_image" else "guidance_scale"
+    setattr(prompt_args, scale_key, 1.0)
+    return "", prompt_args
 
 
 def _router_url(host: str, port: int, path: str) -> str:
@@ -288,6 +303,7 @@ async def _generate_split(args: argparse.Namespace, split: str) -> Path:
     reward_fn = _load_reward_fn(args.reward_function_path, args.reward_function_name)
     seed_rng = torch.Generator().manual_seed(args.seed)
     for _ in range(start_idx):
+        _next_prompt_cfg(args, seed_rng)
         _sample_image_seeds(seed_rng, args.num_images_per_prompt)
 
     with ChunkedParquetWriter(output_path, args.parquet_flush_every, base_table=resume_base_table) as writer:
@@ -298,12 +314,13 @@ async def _generate_split(args: argparse.Namespace, split: str) -> Path:
                     f"[{prompt_idx + 1}/{len(prompts)}] Generating {args.num_images_per_prompt} images "
                     f"for prompt: {prompt!r}"
                 )
-                if _uses_classifier_free_guidance(args):
-                    print(f"  negative_prompt: {args.negative_prompt!r}")
-                prompt_tensors = pipeline_utils.encode_prompt_tensors(pipe, prompt, args.negative_prompt, args)
+                negative_prompt, prompt_args = _next_prompt_cfg(args, seed_rng)
+                if _uses_classifier_free_guidance(prompt_args):
+                    print(f"  negative_prompt: {negative_prompt!r}")
+                prompt_tensors = pipeline_utils.encode_prompt_tensors(pipe, prompt, negative_prompt, prompt_args)
                 seeds = _sample_image_seeds(seed_rng, args.num_images_per_prompt)
                 images = pipe(
-                    **pipeline_utils.build_generate_kwargs(args, prompt, _make_generators(seeds, args.device))
+                    **pipeline_utils.build_generate_kwargs(prompt_args, prompt, _make_generators(seeds, args.device))
                 ).images
                 generated: list[dict[str, Any]] = []
                 for image, seed in zip(images, seeds, strict=True):
@@ -345,7 +362,7 @@ async def _generate_split(args: argparse.Namespace, split: str) -> Path:
                         "data_source": args.data_source,
                         "pipeline": args.pipeline,
                         "prompt": _build_messages(prompt, args.system_prompt),
-                        "negative_prompt": _build_messages(args.negative_prompt, args.system_prompt),
+                        "negative_prompt": _build_messages(negative_prompt, args.system_prompt),
                         "img_win": os.path.relpath(win["path"], output_path.parent),
                         "img_lose": os.path.relpath(lose["path"], output_path.parent),
                         "img_win_latents": win_latents,
@@ -358,7 +375,7 @@ async def _generate_split(args: argparse.Namespace, split: str) -> Path:
                             "split": split,
                             "index": prompt_idx,
                             "raw_prompt": prompt,
-                            "raw_negative_prompt": args.negative_prompt,
+                            "raw_negative_prompt": negative_prompt,
                             "num_candidates": len(candidates),
                             "win_seed": win["seed"],
                             "lose_seed": lose["seed"],
@@ -390,7 +407,12 @@ def main():
     parser.add_argument("--model_path", default="stabilityai/stable-diffusion-3.5-medium")
     parser.add_argument("--data_source", default="offline_dpo")
     parser.add_argument("--system_prompt", default=DEFAULT_SYSTEM_PROMPT)
-    parser.add_argument("--negative_prompt", default=" ")
+    parser.add_argument("--negative_prompt", default=DEFAULT_NEGATIVE_PROMPT)
+    parser.add_argument(
+        "--random_drop_negative_prompt",
+        action="store_true",
+        help="Randomly drop negative_prompt for 50%% of prompts and disable CFG for those samples.",
+    )
     parser.add_argument("--num_images_per_prompt", type=int, default=4)
     parser.add_argument("--height", type=int, default=512)
     parser.add_argument("--width", type=int, default=512)
