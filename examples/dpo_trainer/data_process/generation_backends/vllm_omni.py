@@ -163,7 +163,11 @@ class VllmOmniBackend:
             output = await loop.run_in_executor(None, lambda r=ref: ray.get(r))
             return output, time.perf_counter() - t0
 
-        results = await asyncio.gather(*[_generate_one(seed) for seed in seeds])
+        concurrency = max(1, self.args.generation_concurrency)
+        results: list[tuple[DiffusionOutput, float]] = []
+        for offset in range(0, len(seeds), concurrency):
+            seed_batch = seeds[offset : offset + concurrency]
+            results.extend(await asyncio.gather(*[_generate_one(seed) for seed in seed_batch]))
         candidates = []
         generation_latency_s = []
         for seed, (output, latency_s) in zip(seeds, results, strict=True):
@@ -275,7 +279,7 @@ def launch_generation_server(args: argparse.Namespace):
                     "TOKENIZERS_PARALLELISM": "true",
                 }
             },
-            max_concurrency=max(args.num_images_per_prompt, 8),
+            max_concurrency=args.generation_concurrency,
         ).remote(
             config=_build_rollout_config(args, spec),
             model_config=_build_model_config(args, spec),

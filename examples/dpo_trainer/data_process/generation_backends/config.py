@@ -53,6 +53,12 @@ def add_generation_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--generation_max_num_batched_tokens", type=int, default=8192)
     parser.add_argument("--generation_max_num_seqs", type=int, default=16)
     parser.add_argument("--generation_max_model_len", type=int, default=1058)
+    parser.add_argument(
+        "--generation_concurrency",
+        type=int,
+        default=None,
+        help=("Maximum concurrent vLLM-Omni image generation requests. Default: --num_images_per_prompt."),
+    )
 
 
 def validate_generation_config(args: argparse.Namespace) -> None:
@@ -61,6 +67,10 @@ def validate_generation_config(args: argparse.Namespace) -> None:
             raise ValueError(f"--generation_server vllm_omni supports --pipeline {' or '.join(VLLM_OMNI_PIPELINES)}.")
         if not args.launch_generation_server:
             raise ValueError("--generation_server vllm_omni requires --launch_generation_server.")
+        if args.generation_concurrency is None:
+            args.generation_concurrency = args.num_images_per_prompt
+        if args.generation_concurrency < 1:
+            raise ValueError("--generation_concurrency must be at least 1.")
     elif args.launch_generation_server:
         raise ValueError("--launch_generation_server is only valid with --generation_server vllm_omni.")
 
