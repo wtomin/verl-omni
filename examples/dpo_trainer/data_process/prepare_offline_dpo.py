@@ -293,7 +293,7 @@ def main():
     parser.add_argument("--model_path", default="stabilityai/stable-diffusion-3.5-medium")
     parser.add_argument("--data_source", default="offline_dpo")
     parser.add_argument("--system_prompt", default=DEFAULT_SYSTEM_PROMPT)
-    parser.add_argument("--negative_prompt", default=" ")
+    parser.add_argument("--negative_prompt", default="low quality, blurry, distorted, text artifacts, watermark")
     parser.add_argument("--num_images_per_prompt", type=int, default=4)
     parser.add_argument("--height", type=int, default=512)
     parser.add_argument("--width", type=int, default=512)
