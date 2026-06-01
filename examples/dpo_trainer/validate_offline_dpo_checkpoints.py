@@ -18,6 +18,7 @@ import argparse
 import ast
 import asyncio
 import csv
+import gc
 import importlib
 import importlib.util
 import json
@@ -629,6 +630,54 @@ def _load_huggingface_checkpoint(pipe, huggingface_dir: Path, args: argparse.Nam
     raise FileNotFoundError(f"No supported HuggingFace checkpoint files found under {huggingface_dir}")
 
 
+def _reset_pipeline_checkpoint_weights(pipe) -> None:
+    """Drop checkpoint-specific weights so the next checkpoint can be loaded in-place."""
+    if hasattr(pipe, "unload_lora_weights"):
+        try:
+            pipe.unload_lora_weights()
+        except Exception:
+            pass
+
+    transformer = getattr(pipe, "transformer", None)
+    if transformer is None:
+        return
+
+    peft_config = getattr(transformer, "peft_config", None)
+    if not peft_config:
+        return
+
+    adapter_names = list(peft_config.keys())
+    for name in adapter_names:
+        if hasattr(transformer, "delete_adapter"):
+            transformer.delete_adapter(name)
+
+
+def _release_pipeline(pipe, device: str | None = None) -> None:
+    """Release a diffusion pipeline and return GPU memory to the driver."""
+    if pipe is None:
+        return
+
+    _reset_pipeline_checkpoint_weights(pipe)
+    try:
+        pipe.to("cpu")
+    except Exception:
+        pass
+
+    del pipe
+    gc.collect()
+    if not torch.cuda.is_available():
+        return
+
+    if device is not None and device.startswith("cuda:"):
+        device_index = torch.device(device).index
+        with torch.cuda.device(device_index):
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+    else:
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+
+
 def _load_checkpoint_into_pipeline(pipe, checkpoint: Path, args: argparse.Namespace) -> str:
     if checkpoint.is_dir() and (checkpoint / "adapter_config.json").exists() and _has_lora_weight_file(checkpoint):
         if hasattr(pipe, "load_lora_weights"):
@@ -664,13 +713,25 @@ def _load_checkpoint_into_pipeline(pipe, checkpoint: Path, args: argparse.Namesp
     return _load_transformer_state_dict(pipe, _load_state_dict_file(checkpoint_file), args, checkpoint_file)
 
 
-def _load_pipeline(args: argparse.Namespace, checkpoint: Path | None):
-    pipeline_utils = get_pipeline_utils(args)
-    dtype = {"float16": torch.float16, "bfloat16": torch.bfloat16, "float32": torch.float32}[args.dtype]
-    pipe = pipeline_utils.load_pipeline(args, dtype)
-    pipe.to(args.device)
-    pipe.set_progress_bar_config(disable=args.disable_progress)
-    load_kind = "base"
+def _load_pipeline(
+    args: argparse.Namespace,
+    checkpoint: Path | None,
+    pipe=None,
+    pipeline_utils=None,
+):
+    if pipeline_utils is None:
+        pipeline_utils = get_pipeline_utils(args)
+
+    if pipe is None:
+        dtype = {"float16": torch.float16, "bfloat16": torch.bfloat16, "float32": torch.float32}[args.dtype]
+        pipe = pipeline_utils.load_pipeline(args, dtype)
+        pipe.to(args.device)
+        pipe.set_progress_bar_config(disable=args.disable_progress)
+        load_kind = "base"
+    else:
+        _reset_pipeline_checkpoint_weights(pipe)
+        load_kind = "base_reused"
+
     if checkpoint is not None:
         load_kind = _load_checkpoint_into_pipeline(pipe, checkpoint, args)
     return pipe, pipeline_utils, load_kind
@@ -717,39 +778,36 @@ async def _validate_checkpoint(
     prompts: list[str],
     reward_fn,
     image_dir: Path,
-) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    pipe=None,
+    pipeline_utils=None,
+) -> tuple[dict[str, Any], list[dict[str, Any]], Any, Any]:
     step = 0 if checkpoint is None else _parse_step(checkpoint)
-    pipe, pipeline_utils, load_kind = _load_pipeline(args, checkpoint)
+    pipe, pipeline_utils, load_kind = _load_pipeline(args, checkpoint, pipe=pipe, pipeline_utils=pipeline_utils)
 
     per_prompt_rows = []
     scores = []
     ckpt_image_dir = image_dir / f"step_{step}"
     ckpt_image_dir.mkdir(parents=True, exist_ok=True)
 
-    try:
-        for prompt_idx, prompt in enumerate(prompts):
-            generator = _make_generator(args.seed + max(step, 0) * 100000 + prompt_idx, args.device)
-            kwargs = pipeline_utils.build_generate_kwargs(args, prompt, generator)
-            image = pipe(**kwargs).images[0]
-            image_path = ckpt_image_dir / f"{prompt_idx:06d}.png"
-            image.save(image_path)
-            score = await _score_image(reward_fn, image, prompt, args)
-            scores.append(score)
-            per_prompt_rows.append(
-                {
-                    "step": step,
-                    "checkpoint": "" if checkpoint is None else str(checkpoint),
-                    "load_kind": load_kind,
-                    "prompt_index": prompt_idx,
-                    "prompt": prompt,
-                    "reward": score,
-                    "image_path": str(image_path),
-                }
-            )
-    finally:
-        del pipe
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+    for prompt_idx, prompt in enumerate(prompts):
+        generator = _make_generator(args.seed + max(step, 0) * 100000 + prompt_idx, args.device)
+        kwargs = pipeline_utils.build_generate_kwargs(args, prompt, generator)
+        image = pipe(**kwargs).images[0]
+        image_path = ckpt_image_dir / f"{prompt_idx:06d}.png"
+        image.save(image_path)
+        score = await _score_image(reward_fn, image, prompt, args)
+        scores.append(score)
+        per_prompt_rows.append(
+            {
+                "step": step,
+                "checkpoint": "" if checkpoint is None else str(checkpoint),
+                "load_kind": load_kind,
+                "prompt_index": prompt_idx,
+                "prompt": prompt,
+                "reward": score,
+                "image_path": str(image_path),
+            }
+        )
 
     summary = {
         "step": step,
@@ -759,7 +817,7 @@ async def _validate_checkpoint(
         "mean_reward": float(np.mean(scores)) if scores else 0.0,
         "std_reward": float(np.std(scores)) if scores else 0.0,
     }
-    return summary, per_prompt_rows
+    return summary, per_prompt_rows, pipe, pipeline_utils
 
 
 async def _main_async(args: argparse.Namespace) -> None:
@@ -790,22 +848,35 @@ async def _main_async(args: argparse.Namespace) -> None:
 
     summary_rows = []
     detail_rows = []
-    for checkpoint in checkpoints:
-        try:
-            summary, details = await _validate_checkpoint(args, checkpoint, prompts, reward_fn, image_dir)
-            summary_rows.append(summary)
-            detail_rows.extend(details)
-            print(f"step={summary['step']} mean_reward={summary['mean_reward']:.6f}")
-        except Exception as exc:
-            error_row = {
-                "step": -1 if checkpoint is None else _parse_step(checkpoint),
-                "checkpoint": "" if checkpoint is None else str(checkpoint),
-                "error": repr(exc),
-            }
-            summary_rows.append(error_row)
-            print(f"Failed to validate {checkpoint}: {exc}")
-            if not args.continue_on_error:
-                raise
+    pipe = None
+    pipeline_utils = None
+    try:
+        for checkpoint in checkpoints:
+            try:
+                summary, details, pipe, pipeline_utils = await _validate_checkpoint(
+                    args,
+                    checkpoint,
+                    prompts,
+                    reward_fn,
+                    image_dir,
+                    pipe=pipe,
+                    pipeline_utils=pipeline_utils,
+                )
+                summary_rows.append(summary)
+                detail_rows.extend(details)
+                print(f"step={summary['step']} mean_reward={summary['mean_reward']:.6f}")
+            except Exception as exc:
+                error_row = {
+                    "step": -1 if checkpoint is None else _parse_step(checkpoint),
+                    "checkpoint": "" if checkpoint is None else str(checkpoint),
+                    "error": repr(exc),
+                }
+                summary_rows.append(error_row)
+                print(f"Failed to validate {checkpoint}: {exc}")
+                if not args.continue_on_error:
+                    raise
+    finally:
+        _release_pipeline(pipe, args.device)
 
     _write_jsonl(output_dir / "validation_summary.jsonl", summary_rows)
     _write_jsonl(output_dir / "validation_details.jsonl", detail_rows)
