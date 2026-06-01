@@ -164,6 +164,24 @@ validation prompts, calls the reward function, writes `validation_summary.jsonl`
 `validation_details.jsonl`, CSV copies of both files, and saves
 `reward_curve.png`.
 
+When an actor directory contains multi-GPU FSDP shards such as
+`model_world_size_4_rank_*.pt`, the script merges them into a full checkpoint
+before loading. By default (`--fsdp_merge_backend auto`) it uses
+[`verl.model_merger`](https://verl.readthedocs.io/en/latest/advance/checkpoint.html)
+merge logic in-process and falls back to a local merge for diffusion LoRA
+checkpoints. To export a HuggingFace-format checkpoint manually, use:
+
+```bash
+python -m verl.model_merger merge \
+  --backend fsdp \
+  --local_dir checkpoints/offline_dpo/qwen_image_offline_dpo_lora/global_step_30/actor \
+  --target_dir /path/to/merged_hf_model \
+  --trust-remote-code
+```
+
+Or pass `--fsdp_merge_backend verl_cli` to run the same command inside the
+validation script (mainly for standard HuggingFace actor checkpoints).
+
 ## Reward Template
 
 `prepare_offline_dpo.py` can call any reward function with the standard
