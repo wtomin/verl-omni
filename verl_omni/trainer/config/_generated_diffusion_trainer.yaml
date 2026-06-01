@@ -333,6 +333,9 @@ data:
     path: null
     name: null
     collate_fn: null
+  sample_filter_fn:
+    path: null
+    name: null
   return_multi_modal_inputs: true
   sampler:
     class_path: null

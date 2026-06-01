@@ -92,6 +92,24 @@ loss, so training does not load the SD3 VAE or text encoders during
 actor updates. Offline DPO also disables rollout and reward workers, so
 validation generation is disabled by default.
 
+### Sample Filtering
+
+You can reject weak win/lose pairs at dataloader sampling time. When a sampled
+row fails the filter, the dataset resamples until it finds a qualifying row.
+Configure a callable through `data.sample_filter_fn`:
+
+```bash
+bash examples/dpo_trainer/run_qwen_image_offline_dpo_lora.sh \
+  data.sample_filter_fn.path=pkg://verl_omni.utils.dataset.offline_dpo_dataset \
+  data.sample_filter_fn.name=offline_dpo_score_gap_filter \
+  data.sample_filter_fn.min_score_gap=0.07
+```
+
+The built-in `offline_dpo_score_gap_filter` keeps rows where
+`win_score - lose_score > min_score_gap` (default `0.07`). You can also point
+`path`/`name` to your own function that accepts a parquet row dict and returns
+`True` when the row should be kept.
+
 ## SD3.5 Training
 
 Stable Diffusion 3.5 is also supported. Use `--pipeline sd3` or leave
