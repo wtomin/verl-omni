@@ -310,8 +310,34 @@ def _merge_by_fsdp_placement(tensors: list[torch.Tensor], placement: Any) -> tor
     raise NotImplementedError(f"Unsupported FSDP placement during checkpoint merge: {placement}")
 
 
-def _merge_fsdp_shards_with_verl(checkpoint_dir: Path, target_dir: Path) -> Path:
-    """Merge sharded FSDP checkpoints via ``python -m verl.model_merger merge``."""
+def _merge_fsdp_shards_with_verl_library(checkpoint_dir: Path) -> dict[str, torch.Tensor]:
+    """Merge FSDP shards using ``verl.model_merger.FSDPModelMerger`` merge logic."""
+    from verl.model_merger.fsdp_model_merger import FSDPModelMerger
+
+    checkpoint_dir = checkpoint_dir.resolve()
+    world_size = _infer_fsdp_world_size(checkpoint_dir)
+    rank_zero_state_dict = _load_state_dict_file(checkpoint_dir / f"model_world_size_{world_size}_rank_0.pt")
+
+    merger = object.__new__(FSDPModelMerger)
+    mesh, mesh_dim_names = merger._extract_device_mesh_info(rank_zero_state_dict, world_size)
+    total_shards, mesh_shape = merger._calculate_shard_configuration(mesh, mesh_dim_names)
+    print(
+        f"Merging {total_shards} FSDP shards with verl.model_merger library from {checkpoint_dir} "
+        f"(world_size={world_size})"
+    )
+    return merger._load_and_merge_state_dicts(world_size, total_shards, mesh_shape, mesh_dim_names)
+
+
+def _merge_fsdp_shards_with_verl_cli(
+    checkpoint_dir: Path,
+    target_dir: Path,
+    *,
+    use_cpu_initialization: bool,
+) -> Path:
+    """Merge sharded FSDP checkpoints via ``python -m verl.model_merger merge``.
+
+    See https://verl.readthedocs.io/en/latest/advance/checkpoint.html
+    """
     command = [
         sys.executable,
         "-m",
@@ -325,12 +351,68 @@ def _merge_fsdp_shards_with_verl(checkpoint_dir: Path, target_dir: Path) -> Path
         str(target_dir.resolve()),
         "--trust-remote-code",
     ]
-    print(f"Merging FSDP shards with verl.model_merger: {' '.join(command)}")
-    subprocess.run(command, check=True)
+    if use_cpu_initialization:
+        command.append("--use_cpu_initialization")
+    print(f"Merging FSDP shards with verl.model_merger CLI: {' '.join(command)}")
+    completed = subprocess.run(command, check=False, capture_output=True, text=True)
+    if completed.stdout:
+        print(completed.stdout.rstrip())
+    if completed.returncode != 0:
+        stderr = completed.stderr.strip()
+        raise RuntimeError(
+            "verl.model_merger merge failed. "
+            "See https://verl.readthedocs.io/en/latest/advance/checkpoint.html "
+            f"for manual merge instructions. CLI stderr:\n{stderr}"
+        )
     lora_adapter_dir = target_dir / "lora_adapter"
     if lora_adapter_dir.is_dir() and (lora_adapter_dir / "adapter_config.json").exists():
         return lora_adapter_dir
     return target_dir
+
+
+def _merge_fsdp_shards_for_validation(checkpoint_dir: Path, args: argparse.Namespace) -> dict[str, torch.Tensor]:
+    backend = args.fsdp_merge_backend
+    if backend in ("auto", "verl"):
+        try:
+            return _merge_fsdp_shards_with_verl_library(checkpoint_dir)
+        except ImportError as exc:
+            if backend == "verl":
+                raise ImportError(
+                    "fsdp_merge_backend=verl requires verl with model_merger installed. "
+                    "Install verl or use --fsdp_merge_backend local."
+                ) from exc
+            print(f"verl.model_merger is unavailable ({exc}); falling back to local FSDP merge.")
+        except Exception as exc:
+            if backend == "verl":
+                raise RuntimeError(f"verl.model_merger FSDP merge failed: {exc}") from exc
+            print(f"verl.model_merger FSDP merge failed ({exc}); falling back to local FSDP merge.")
+
+    return _merge_fsdp_sharded_state_dict(checkpoint_dir)
+
+
+def _load_checkpoint_from_verl_cli_merge(pipe, checkpoint: Path, args: argparse.Namespace, target_dir: Path) -> str:
+    merged_path = _merge_fsdp_shards_with_verl_cli(
+        checkpoint,
+        target_dir,
+        use_cpu_initialization=args.fsdp_merge_use_cpu,
+    )
+    if merged_path.name == "lora_adapter":
+        if hasattr(pipe, "load_lora_weights"):
+            pipe.load_lora_weights(str(merged_path))
+            return "merged_fsdp_lora_adapter"
+        if hasattr(pipe.transformer, "load_lora_adapter"):
+            pipe.transformer.load_lora_adapter(str(merged_path))
+            return "merged_fsdp_transformer_lora_adapter"
+    for name in CHECKPOINT_FILE_NAMES:
+        candidate = merged_path / name
+        if candidate.exists():
+            return _load_transformer_state_dict(pipe, _load_state_dict_file(candidate), args, checkpoint)
+    if (merged_path / "transformer").is_dir():
+        return _load_huggingface_checkpoint(pipe, merged_path, args)
+    raise FileNotFoundError(
+        f"verl.model_merger wrote no loadable weights under {merged_path}. "
+        "For diffusion LoRA checkpoints, prefer --fsdp_merge_backend auto or local."
+    )
 
 
 def _merge_fsdp_sharded_state_dict(checkpoint_dir: Path) -> dict[str, torch.Tensor]:
@@ -398,25 +480,11 @@ def _merge_fsdp_sharded_state_dict(checkpoint_dir: Path) -> dict[str, torch.Tens
 
 
 def _load_merged_fsdp_checkpoint(pipe, checkpoint: Path, args: argparse.Namespace) -> str:
-    huggingface_dir = checkpoint / "huggingface"
-    if huggingface_dir.is_dir():
+    if args.fsdp_merge_backend == "verl_cli":
         with tempfile.TemporaryDirectory(prefix="verl_fsdp_merge_") as tmp_dir:
-            merged_path = _merge_fsdp_shards_with_verl(checkpoint, Path(tmp_dir))
-            if merged_path.name == "lora_adapter":
-                if hasattr(pipe, "load_lora_weights"):
-                    pipe.load_lora_weights(str(merged_path))
-                    return "merged_fsdp_lora_adapter"
-                if hasattr(pipe.transformer, "load_lora_adapter"):
-                    pipe.transformer.load_lora_adapter(str(merged_path))
-                    return "merged_fsdp_transformer_lora_adapter"
-            for name in CHECKPOINT_FILE_NAMES:
-                candidate = merged_path / name
-                if candidate.exists():
-                    return _load_transformer_state_dict(pipe, _load_state_dict_file(candidate), args, checkpoint)
-            if (merged_path / "transformer").is_dir():
-                return _load_huggingface_checkpoint(pipe, merged_path, args)
+            return _load_checkpoint_from_verl_cli_merge(pipe, checkpoint, args, Path(tmp_dir))
 
-    state_dict = _merge_fsdp_sharded_state_dict(checkpoint)
+    state_dict = _merge_fsdp_shards_for_validation(checkpoint, args)
     load_kind = _load_transformer_state_dict(pipe, state_dict, args, checkpoint)
     return f"merged_fsdp_{load_kind}"
 
@@ -818,6 +886,22 @@ def main() -> None:
     )
     parser.add_argument("--disable_progress", action="store_true")
     parser.add_argument("--continue_on_error", action="store_true")
+    parser.add_argument(
+        "--fsdp_merge_backend",
+        choices=["auto", "verl", "local", "verl_cli"],
+        default="auto",
+        help=(
+            "How to merge multi-GPU FSDP actor shards before validation. "
+            "'auto' uses verl.model_merger merge logic when available, otherwise a local merge. "
+            "'verl_cli' exports HuggingFace weights via `python -m verl.model_merger merge` "
+            "(see https://verl.readthedocs.io/en/latest/advance/checkpoint.html)."
+        ),
+    )
+    parser.add_argument(
+        "--fsdp_merge_use_cpu",
+        action="store_true",
+        help="Pass --use_cpu_initialization to verl.model_merger when --fsdp_merge_backend=verl_cli.",
+    )
     args = parser.parse_args()
     get_pipeline_utils(args)
     _apply_gpu_device_defaults(args)
