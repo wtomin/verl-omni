@@ -25,6 +25,8 @@ import os
 import re
 import shlex
 import subprocess
+import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -256,8 +258,171 @@ def _load_state_dict_file(path: Path) -> dict[str, torch.Tensor]:
     raise TypeError(f"Unsupported checkpoint object type from {path}: {type(state)}")
 
 
+def _shard_rank(path: Path) -> int:
+    match = re.search(r"rank_(\d+)", path.name)
+    if match is None:
+        raise ValueError(f"Unexpected FSDP shard filename: {path.name}")
+    return int(match.group(1))
+
+
+def _list_actor_model_shards(checkpoint: Path) -> list[Path]:
+    return sorted(checkpoint.glob("model_world_size_*_rank_*.pt"), key=_shard_rank)
+
+
+def _infer_fsdp_world_size(checkpoint: Path, shards: list[Path] | None = None) -> int:
+    if shards is None:
+        shards = _list_actor_model_shards(checkpoint)
+
+    config_path = checkpoint / "fsdp_config.json"
+    if config_path.exists():
+        with config_path.open(encoding="utf-8") as f:
+            world_size = json.load(f).get("world_size")
+            if world_size is not None:
+                return int(world_size)
+
+    if not shards:
+        raise FileNotFoundError(f"No FSDP model shards found under {checkpoint}")
+    match = re.fullmatch(r"model_world_size_(\d+)_rank_(\d+)\.pt", shards[0].name)
+    if match is None:
+        raise ValueError(f"Unexpected FSDP shard filename: {shards[0].name}")
+    return int(match.group(1))
+
+
+def _is_multi_shard_fsdp_checkpoint(checkpoint: Path) -> bool:
+    if not checkpoint.is_dir():
+        return False
+    shards = _list_actor_model_shards(checkpoint)
+    if not shards:
+        return False
+    try:
+        return _infer_fsdp_world_size(checkpoint, shards) > 1
+    except (FileNotFoundError, ValueError):
+        return len(shards) > 1
+
+
+def _merge_by_fsdp_placement(tensors: list[torch.Tensor], placement: Any) -> torch.Tensor:
+    if placement.is_replicate():
+        return tensors[0]
+    if placement.is_partial():
+        raise NotImplementedError("Partial FSDP placement is not supported during checkpoint merge.")
+    if placement.is_shard():
+        return torch.cat(tensors, dim=placement.dim).contiguous()
+    raise NotImplementedError(f"Unsupported FSDP placement during checkpoint merge: {placement}")
+
+
+def _merge_fsdp_shards_with_verl(checkpoint_dir: Path, target_dir: Path) -> Path:
+    """Merge sharded FSDP checkpoints via ``python -m verl.model_merger merge``."""
+    command = [
+        sys.executable,
+        "-m",
+        "verl.model_merger",
+        "merge",
+        "--backend",
+        "fsdp",
+        "--local_dir",
+        str(checkpoint_dir.resolve()),
+        "--target_dir",
+        str(target_dir.resolve()),
+        "--trust-remote-code",
+    ]
+    print(f"Merging FSDP shards with verl.model_merger: {' '.join(command)}")
+    subprocess.run(command, check=True)
+    lora_adapter_dir = target_dir / "lora_adapter"
+    if lora_adapter_dir.is_dir() and (lora_adapter_dir / "adapter_config.json").exists():
+        return lora_adapter_dir
+    return target_dir
+
+
+def _merge_fsdp_sharded_state_dict(checkpoint_dir: Path) -> dict[str, torch.Tensor]:
+    """Merge FSDP actor shards into one state dict for single-GPU validation."""
+    checkpoint_dir = checkpoint_dir.resolve()
+    shards = _list_actor_model_shards(checkpoint_dir)
+    world_size = _infer_fsdp_world_size(checkpoint_dir, shards)
+    if world_size <= 1:
+        if not shards:
+            raise FileNotFoundError(f"No FSDP model shards found under {checkpoint_dir}")
+        return _load_state_dict_file(shards[0])
+    if len(shards) < world_size:
+        raise FileNotFoundError(f"Expected {world_size} FSDP shards under {checkpoint_dir}, found {len(shards)}.")
+
+    try:
+        from torch.distributed.tensor import DTensor
+    except ImportError:
+        from torch.distributed._tensor import DTensor
+
+    model_state_dict_lst = [
+        _load_state_dict_file(checkpoint_dir / f"model_world_size_{world_size}_rank_{rank}.pt")
+        for rank in range(world_size)
+    ]
+
+    pivot_key = sorted(model_state_dict_lst[0])[0]
+    pivot_tensor = model_state_dict_lst[0][pivot_key]
+    if isinstance(pivot_tensor, DTensor):
+        mesh_dim_names = pivot_tensor.device_mesh.mesh_dim_names
+    else:
+        mesh_dim_names = ("fsdp",)
+
+    merged: dict[str, Any] = {}
+    param_placements: dict[str, tuple[Any, ...]] = {}
+
+    for key in model_state_dict_lst[0]:
+        merged[key] = []
+        for shard_state in model_state_dict_lst:
+            tensor = shard_state[key]
+            if isinstance(tensor, DTensor):
+                merged[key].append(tensor._local_tensor.bfloat16())
+                placements = tuple(tensor.placements)
+                if mesh_dim_names[0] in ("dp", "ddp"):
+                    placements = placements[1:]
+                if key not in param_placements:
+                    param_placements[key] = placements
+                elif param_placements[key] != placements:
+                    raise RuntimeError(f"Inconsistent FSDP placements for parameter {key!r}.")
+            else:
+                merged[key].append(tensor.bfloat16() if tensor.is_floating_point() else tensor)
+
+    for key in sorted(merged):
+        shards_for_key = merged[key]
+        if not isinstance(shards_for_key, list):
+            continue
+        if key in param_placements:
+            placements = param_placements[key]
+            if len(placements) != 1:
+                raise NotImplementedError("FSDP + tensor parallelism checkpoint merge is not supported.")
+            merged[key] = _merge_by_fsdp_placement(shards_for_key, placements[0])
+        else:
+            merged[key] = torch.cat(shards_for_key, dim=0)
+
+    print(f"Merged {world_size} FSDP shards from {checkpoint_dir} into a full state dict.")
+    return merged
+
+
+def _load_merged_fsdp_checkpoint(pipe, checkpoint: Path, args: argparse.Namespace) -> str:
+    huggingface_dir = checkpoint / "huggingface"
+    if huggingface_dir.is_dir():
+        with tempfile.TemporaryDirectory(prefix="verl_fsdp_merge_") as tmp_dir:
+            merged_path = _merge_fsdp_shards_with_verl(checkpoint, Path(tmp_dir))
+            if merged_path.name == "lora_adapter":
+                if hasattr(pipe, "load_lora_weights"):
+                    pipe.load_lora_weights(str(merged_path))
+                    return "merged_fsdp_lora_adapter"
+                if hasattr(pipe.transformer, "load_lora_adapter"):
+                    pipe.transformer.load_lora_adapter(str(merged_path))
+                    return "merged_fsdp_transformer_lora_adapter"
+            for name in CHECKPOINT_FILE_NAMES:
+                candidate = merged_path / name
+                if candidate.exists():
+                    return _load_transformer_state_dict(pipe, _load_state_dict_file(candidate), args, checkpoint)
+            if (merged_path / "transformer").is_dir():
+                return _load_huggingface_checkpoint(pipe, merged_path, args)
+
+    state_dict = _merge_fsdp_sharded_state_dict(checkpoint)
+    load_kind = _load_transformer_state_dict(pipe, state_dict, args, checkpoint)
+    return f"merged_fsdp_{load_kind}"
+
+
 def _find_actor_model_shard(checkpoint: Path) -> Path | None:
-    shards = sorted(checkpoint.glob("model_world_size_*_rank_*.pt"))
+    shards = _list_actor_model_shards(checkpoint)
     return shards[0] if shards else None
 
 
@@ -414,6 +579,9 @@ def _load_checkpoint_into_pipeline(pipe, checkpoint: Path, args: argparse.Namesp
 
     checkpoint_file = checkpoint
     if checkpoint.is_dir():
+        if _is_multi_shard_fsdp_checkpoint(checkpoint):
+            return _load_merged_fsdp_checkpoint(pipe, checkpoint, args)
+
         for name in CHECKPOINT_FILE_NAMES:
             candidate = checkpoint / name
             if candidate.exists():
