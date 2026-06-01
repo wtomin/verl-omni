@@ -833,6 +833,12 @@ def main() -> None:
     parser.add_argument("--guidance_scale", type=float, default=4.0)
     parser.add_argument("--true_cfg_scale", type=float, default=4.0)
     parser.add_argument("--max_sequence_length", type=int, default=256)
+    parser.add_argument(
+        "--num_images_per_prompt",
+        type=int,
+        default=1,
+        help="Number of images to generate per validation prompt.",
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--device", default=None)
     parser.add_argument("--dtype", choices=["float16", "bfloat16", "float32"], default="bfloat16")
