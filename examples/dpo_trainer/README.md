@@ -53,7 +53,6 @@ bash examples/dpo_trainer/run_qwen_image_online_dpo_lora.sh \
 
 > Online DPO experiment conducted on *NVIDIA H800* GPUs with the same OCR reward and prompt parquet as FlowGRPO Qwen-Image training.
 
-The experiment settings and throughputs are shown in the table below. Online DPO forms one `[chosen, rejected]` pair per prompt after rollout, so **training samples per step** counts actor-update pairs (`train_batch_size × 2`). **Throughput** follows trainer metrics: `perf/total_num_images / (perf/time_per_step × n_gpus)` (64 images per step on 4 GPUs).
 
 | Script | Model | Algorithm | Hybrid Engine | # Cards | Reward Fn | # GPUs for Actor | # GPUs for Rollout | # GPUs for Async Reward | Batch Size | `rollout.n` | lr   | # Val Samples | Training Samples per Step | `ppo_micro_batch_size_per_gpu` | Throughput (Samples / GPU / Seconds) | Time per Step (Seconds) |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -61,6 +60,7 @@ The experiment settings and throughputs are shown in the table below. Online DPO
 
 - Colocated actor, vLLM-Omni rollout, and sync OCR reward on 4 GPUs; `rollout.n=16` samples candidates, then top/bottom pairing keeps 64 actor-update images per step (`perf/total_num_images=64`).
 - Validation uses `trainer.val_before_train=True` on the full OCR test parquet (same as FlowGRPO).
+- Unlike policy-gradient trainers (e.g. FlowGRPO), where actor updates use `train_batch_size × rollout.n` images per step, online DPO keeps one `[chosen, rejected]` pair per prompt (`train_batch_size × 2`), so throughput numbers are not directly comparable—use the **Training Samples per Step** column.
 
 > **Note:** Reward curves may differ between runs because online DPO depends on stochastic diffusion rollouts and the example scripts do not fix the data seed.
 
