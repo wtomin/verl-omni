@@ -24,6 +24,7 @@ import torch
 import torch.nn.functional as F
 from omegaconf import DictConfig
 from tensordict import TensorDict
+from verl import DataProto
 from verl.utils import tensordict_utils as tu
 
 from verl_omni.workers.config import DiffusionActorConfig
@@ -81,6 +82,15 @@ class DiffusionLossFn(ABC):
             details.append(f"Missing data keys: {missing_data}.")
             details.append(f"Available data keys: {_format_available_keys(data)}.")
         raise KeyError(" ".join(details))
+
+    @staticmethod
+    def prepare_actor_batch(
+        batch: Any,
+        config: Any = None,
+    ) -> Any:
+        """Prepare rollout outputs for actor update when the trainer has not already done so."""
+
+        return batch
 
     @classmethod
     @abstractmethod
@@ -488,6 +498,104 @@ class DPOLoss(DiffusionLossFn):
     required_model_output_keys = ("noise", "latent", "noise_pred")
     required_data_keys = ("ref_noise_pred", "sample_level_rewards")
 
+    @staticmethod
+    def _is_offline_dpo(config: Any) -> bool:
+        if config is None:
+            return False
+        if hasattr(config, "get"):
+            sample_source = config.get("sample_source", "online")
+        else:
+            sample_source = getattr(config, "sample_source", "online")
+        return sample_source == "offline"
+
+    @staticmethod
+    def build_online_dpo_pair_indices(
+        *,
+        uids: np.ndarray,
+        scores: torch.Tensor,
+    ) -> list[int]:
+        """Build one adjacent top-vs-bottom chosen/rejected pair per prompt."""
+
+        flat_scores = scores.squeeze(-1) if scores.ndim > 1 else scores
+        score_values = flat_scores.detach().cpu().float().tolist()
+        uid_values = np.asarray(uids, dtype=object).reshape(-1)
+        if len(uid_values) != len(score_values):
+            raise ValueError(
+                f"Online DPO pairing expects one uid per score, got {len(uid_values)} vs {len(score_values)}."
+            )
+
+        uid_to_indices: dict[Any, list[int]] = defaultdict(list)
+        for idx, uid in enumerate(uid_values):
+            uid_to_indices[uid].append(idx)
+
+        selected_indices: list[int] = []
+        for group_indices in uid_to_indices.values():
+            if len(group_indices) < 2:
+                continue
+
+            sorted_indices = sorted(group_indices, key=lambda idx: score_values[idx], reverse=True)
+            selected_indices.extend([sorted_indices[0], sorted_indices[-1]])
+
+        return selected_indices
+
+    @staticmethod
+    def _select_dataproto_indices(batch: DataProto, selected_indices: list[int]) -> DataProto:
+        selected_non_tensor = {}
+        for key, value in batch.non_tensor_batch.items():
+            values = np.asarray(value, dtype=object).reshape(-1)
+            if len(values) == len(batch):
+                selected_non_tensor[key] = values[selected_indices]
+            else:
+                selected_non_tensor[key] = value
+
+        selected_tensor = torch.as_tensor(selected_indices, dtype=torch.long)
+        return DataProto(
+            batch=batch.batch[selected_tensor],
+            non_tensor_batch=selected_non_tensor,
+            meta_info=batch.meta_info,
+        )
+
+    @staticmethod
+    def prepare_actor_batch(
+        batch: DataProto,
+        config: Any,
+    ) -> DataProto:
+        """Select adjacent chosen/rejected samples for direct-preference actor updates.
+
+        Offline DPO batches already contain pre-ranked ``[chosen, rejected]`` pairs, so
+        the batch is returned unchanged. Online DPO groups rollout samples by prompt
+        ``uid``, keeps the highest- and lowest-scoring candidates per prompt, and
+        reindexes the batch to adjacent ``[chosen, rejected]`` order.
+
+        Args:
+            batch (DataProto): Rollout batch with ``sample_level_scores`` and prompt
+                ``uid`` values in ``non_tensor_batch``.
+            config (Any): Algorithm configuration; ``sample_source`` selects offline vs
+                online pairing behavior.
+
+        Returns:
+            DataProto: The input batch, or a subset reindexed for online pairing.
+        """
+        if DPOLoss._is_offline_dpo(config):
+            return batch
+
+        if "uid" not in batch.non_tensor_batch:
+            raise KeyError("Online DPO pairing requires `uid` in non_tensor_batch.")
+
+        selected_indices = DPOLoss.build_online_dpo_pair_indices(
+            uids=batch.non_tensor_batch["uid"],
+            scores=batch.batch["sample_level_scores"],
+        )
+        if not selected_indices:
+            raise RuntimeError(
+                "Online DPO could not build any preference pairs from rollout rewards. "
+                "Increase actor_rollout_ref.rollout.n so each prompt has at least two sampled candidates."
+            )
+
+        batch = DPOLoss._select_dataproto_indices(batch, selected_indices)
+        batch.meta_info["prepare_actor_batch_selected_indices"] = selected_indices
+        return batch
+
     @classmethod
     def _dpo_adjacent_pairs_share_prompt_uid(cls, index: Any, n: int) -> bool:
         """Return True if each adjacent (chosen, rejected) pair shares the same prompt uid.
@@ -565,9 +673,15 @@ class DPOLoss(DiffusionLossFn):
         dpo_loss = -F.logsigmoid(inside_term).mean()
 
         with torch.no_grad():
+            implicit_reward_chosen = -0.5 * beta * w_diff
+            implicit_reward_rejected = -0.5 * beta * l_diff
+            reward_margins = implicit_reward_chosen - implicit_reward_rejected
             metrics = {
                 "actor/dpo_loss": dpo_loss.detach().item(),
                 "actor/implicit_acc": implicit_acc.detach().item(),
+                "rewards/chosen": implicit_reward_chosen.mean().detach().item(),
+                "rewards/rejected": implicit_reward_rejected.mean().detach().item(),
+                "rewards/margins": reward_margins.mean().detach().item(),
             }
         return dpo_loss, metrics
 

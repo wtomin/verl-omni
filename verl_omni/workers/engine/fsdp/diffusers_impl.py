@@ -668,12 +668,34 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
         self.checkpoint_manager.save_checkpoint(
             local_path=local_path, hdfs_path=hdfs_path, global_step=global_step, max_ckpt_to_keep=max_ckpt_to_keep
         )
+        if self._is_lora:
+            self._save_lora_adapter_config(local_path)
 
         torch.distributed.barrier()
         if self._is_offload_param:
             offload_fsdp_model_to_cpu(self.module)
         gc.collect()
         aggressive_empty_cache(force_sync=True)
+
+    def _save_lora_adapter_config(self, local_path: str) -> None:
+        """Persist PEFT adapter metadata alongside FSDP weights for offline validation."""
+        if not self._is_lora:
+            return
+        if torch.distributed.get_rank() != 0:
+            return
+
+        peft_model = getattr(self.module, "_fsdp_wrapped_module", self.module)
+        peft_config = getattr(peft_model, "peft_config", None)
+        if not peft_config:
+            return
+
+        default_config = peft_config.get("default", None)
+        if default_config is None:
+            return
+
+        huggingface_dir = os.path.join(local_path, "huggingface")
+        os.makedirs(huggingface_dir, exist_ok=True)
+        default_config.save_pretrained(huggingface_dir)
 
     def load_checkpoint(
         self, local_path: str, hdfs_path: Optional[str] = None, del_local_after_load: int = True, **kwargs
@@ -917,9 +939,9 @@ class DPODiffusersFSDPEngine(DiffusersFSDPEngine):
     """Diffusers FSDP engine variant for diffusion DPO."""
 
     def _prepare_noisy_latents(self, micro_batch: TensorDict) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        latents = micro_batch.get("image_latents", None)
+        latents = micro_batch.get("latents_clean", None)
         if latents is None:
-            raise KeyError("Diffusion DPO training requires `image_latents` in the micro batch.")
+            raise KeyError("Diffusion DPO training requires `latents_clean` in the micro batch.")
 
         return prepare_noisy_latents(
             latents=latents,
@@ -970,7 +992,7 @@ class DPODiffusersFSDPEngine(DiffusersFSDPEngine):
         del step
 
         noisy_latents, noise, timesteps = self._prepare_noisy_latents(micro_batch)
-        latent = micro_batch["image_latents"].to(device=noise.device, dtype=noise.dtype)
+        latent = micro_batch["latents_clean"].to(device=noise.device, dtype=noise.dtype)
         prompt_embeds = micro_batch["prompt_embeds"]
         prompt_embeds_mask = micro_batch.get("prompt_embeds_mask", None)
         negative_prompt_embeds = micro_batch.get("negative_prompt_embeds", None)
