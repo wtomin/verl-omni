@@ -83,15 +83,6 @@ class DiffusionLossFn(ABC):
             details.append(f"Available data keys: {_format_available_keys(data)}.")
         raise KeyError(" ".join(details))
 
-    @staticmethod
-    def prepare_actor_batch(
-        batch: Any,
-        config: Any = None,
-    ) -> Any:
-        """Prepare rollout outputs for actor update when the trainer has not already done so."""
-
-        return batch
-
     @classmethod
     @abstractmethod
     def compute_loss(cls, **kwargs: Any) -> tuple[torch.Tensor, dict[str, Any]]:
@@ -123,10 +114,10 @@ class DiffusionLossFn(ABC):
 
         Reverse-process policy-gradient losses such as FlowGRPO can keep the batch
         unchanged because their trainer path has already added ``old_log_probs`` and
-        ``advantages``. DPO can also keep
+        ``advantages``. Offline DPO can also keep
         the batch unchanged because offline preference data plus reference
         predictions provide the loss inputs directly. Forward-process online
-        losses such as DiffusionNFT override this hook to turn final-latent
+        losses such as DiffusionNFT and online DPO override this hook to turn final-latent
         rollouts and rewards into loss-specific actor tensors.
         """
         return batch
@@ -558,6 +549,7 @@ class DPOLoss(DiffusionLossFn):
     @staticmethod
     def prepare_actor_batch(
         batch: DataProto,
+        rewards: torch.Tensor,
         config: Any,
     ) -> DataProto:
         """Select adjacent chosen/rejected samples for direct-preference actor updates.
@@ -570,6 +562,7 @@ class DPOLoss(DiffusionLossFn):
         Args:
             batch (DataProto): Rollout batch with ``sample_level_scores`` and prompt
                 ``uid`` values in ``non_tensor_batch``.
+            rewards (torch.Tensor): Sample-level rewards, shape ``(B,)``.
             config (Any): Algorithm configuration; ``sample_source`` selects offline vs
                 online pairing behavior.
 
@@ -584,7 +577,7 @@ class DPOLoss(DiffusionLossFn):
 
         selected_indices = DPOLoss.build_online_dpo_pair_indices(
             uids=batch.non_tensor_batch["uid"],
-            scores=batch.batch["sample_level_scores"],
+            scores=rewards,
         )
         if not selected_indices:
             raise RuntimeError(

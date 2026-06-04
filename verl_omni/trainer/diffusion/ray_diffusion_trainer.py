@@ -1229,9 +1229,7 @@ class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
         ppo_mini_batch_size = self.config.actor_rollout_ref.actor.ppo_mini_batch_size
         paired = self.config.algorithm.get("paired_preference", False)
         ppo_mini_batch_size = (
-            ppo_mini_batch_size * 2
-            if paired
-            else ppo_mini_batch_size * self.config.actor_rollout_ref.rollout.n
+            ppo_mini_batch_size * 2 if paired else ppo_mini_batch_size * self.config.actor_rollout_ref.rollout.n
         )  # direct preference has a pair per prompt
         ppo_epochs = self.config.actor_rollout_ref.actor.ppo_epochs
         seed = self.config.actor_rollout_ref.actor.data_loader_seed
@@ -1437,11 +1435,12 @@ class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
                             reward_tensor, reward_extra_infos_dict = extract_reward(batch)
                             batch.batch["sample_level_scores"] = reward_tensor
 
-
+                    reward_tensor = batch.batch["sample_level_scores"]
                     with marked_timer("prepare_actor_batch", timing_raw, color="brown"):
                         if reward_extra_infos_dict:
                             batch.non_tensor_batch.update({k: np.array(v) for k, v in reward_extra_infos_dict.items()})
-                        batch = self._prepare_actor_batch(batch)
+                        batch = self._prepare_actor_batch(batch, reward_tensor)
+
                     batch.batch["sample_level_rewards"] = batch.batch["sample_level_scores"]
                     if self.use_reference_policy:
                         with marked_timer(str(Role.RefPolicy), timing_raw, color="olive"):
