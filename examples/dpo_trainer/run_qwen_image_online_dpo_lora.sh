@@ -38,7 +38,7 @@ python3 -m verl_omni.trainer.main_diffusion \
     actor_rollout_ref.model.pipeline.true_cfg_scale=1.0 \
     actor_rollout_ref.actor.diffusion_loss.loss_mode=dpo \
     actor_rollout_ref.actor.diffusion_loss.dpo_beta=100.0 \
-    actor_rollout_ref.actor.optim.lr=1e-4 \
+    actor_rollout_ref.actor.optim.lr=3e-4 \
     actor_rollout_ref.actor.optim.weight_decay=0.0001 \
     actor_rollout_ref.actor.ppo_mini_batch_size=16 \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=8 \
@@ -72,7 +72,7 @@ python3 -m verl_omni.trainer.main_diffusion \
     trainer.val_before_train=True \
     trainer.n_gpus_per_node=$NUM_GPUS_ACTOR_ROLLOUT_REWARD \
     trainer.nnodes=1 \
-    trainer.save_freq=30 \
-    trainer.test_freq=30 \
+    trainer.save_freq=20 \
+    trainer.test_freq=20 \
     trainer.total_epochs=15 \
     trainer.total_training_steps=300 "$@"
