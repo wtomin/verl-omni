@@ -274,6 +274,7 @@ class vLLMOmniHttpServer(vLLMHttpServer):
 
         all_latents = mm_output.get("all_latents")
         all_timesteps = mm_output.get("all_timesteps")
+        latents_clean = mm_output.get("latents_clean")
         prompt_embeds = mm_output.get("prompt_embeds")
         prompt_embeds_mask = mm_output.get("prompt_embeds_mask")
         negative_prompt_embeds = mm_output.get("negative_prompt_embeds")

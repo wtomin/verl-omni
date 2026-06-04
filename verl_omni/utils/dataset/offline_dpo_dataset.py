@@ -23,10 +23,13 @@ Parquet rows are expected to be produced by
 captions in ``extra_info["raw_prompt"]`` and ``extra_info["raw_negative_prompt"]``.
 """
 
+import functools
 import io
+import logging
 import os
+import random
 import uuid
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -36,8 +39,18 @@ import torch
 from omegaconf import DictConfig
 from torch.utils.data import Dataset
 from verl.utils.dataset.rl_dataset import collate_fn as _upstream_collate_fn
+from verl.utils.import_utils import load_extern_object
+
+logger = logging.getLogger(__name__)
+
+SAMPLE_FILTER_FN_RESERVED_KEYS = frozenset({"path", "name"})
+DEFAULT_SAMPLE_FILTER_MAX_ATTEMPTS = 10_000
 
 OFFLINE_DPO_PAIR_MARKER = "__offline_dpo_pair__"
+PROMPT_EMBED_MASK_PAIRS = (
+    ("prompt_embeds", "prompt_embeds_mask"),
+    ("negative_prompt_embeds", "negative_prompt_embeds_mask"),
+)
 
 
 def _read_dataframe(data_files: str | Sequence[str]) -> pd.DataFrame:
@@ -167,8 +180,80 @@ def _tensor_from_column(value: Any, *, dtype: torch.dtype) -> torch.Tensor:
     return torch.tensor(_to_nested(value), dtype=dtype)
 
 
+def _pad_tensor_first_dim(tensor: torch.Tensor, target_length: int, pad_value: float | int) -> torch.Tensor:
+    if tensor.shape[0] == target_length:
+        return tensor
+    padded_shape = (target_length, *tensor.shape[1:])
+    padded = tensor.new_full(padded_shape, pad_value)
+    padded[: tensor.shape[0]] = tensor
+    return padded
+
+
+def offline_dpo_score_gap_filter(
+    row: dict,
+    *,
+    min_score_gap: float = 0.07,
+    win_score_key: str = "win_score",
+    lose_score_key: str = "lose_score",
+) -> bool:
+    """Return True when ``win_score - lose_score`` exceeds ``min_score_gap``."""
+    win_score = float(row.get(win_score_key, 1.0))
+    lose_score = float(row.get(lose_score_key, 0.0))
+    return (win_score - lose_score) > min_score_gap
+
+
+def resolve_sample_filter_fn(config: DictConfig) -> Callable[[dict], bool] | None:
+    """Load an optional row filter callable from ``config.sample_filter_fn``."""
+    filter_cfg = config.get("sample_filter_fn")
+    if filter_cfg is None:
+        return None
+
+    path = filter_cfg.get("path")
+    if path is None:
+        return None
+
+    name = filter_cfg.get("name")
+    if name is None:
+        raise ValueError("data.sample_filter_fn.name is required when path is set.")
+
+    fn = load_extern_object(path, name)
+    if not callable(fn):
+        raise TypeError(f"The sample filter function '{name}' from '{path}' must be callable and accept a row dict.")
+
+    kwargs = {key: value for key, value in filter_cfg.items() if key not in SAMPLE_FILTER_FN_RESERVED_KEYS}
+    if kwargs:
+        fn = functools.partial(fn, **kwargs)
+    logger.info("Using offline DPO sample filter: %s:%s", path, name)
+    return fn
+
+
+def _pad_prompt_embed_pairs(features: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    for embed_key, mask_key in PROMPT_EMBED_MASK_PAIRS:
+        embeds = [feature.get(embed_key) for feature in features if isinstance(feature.get(embed_key), torch.Tensor)]
+        if not embeds:
+            continue
+        max_length = max(embed.shape[0] for embed in embeds)
+        for feature in features:
+            embed = feature.get(embed_key)
+            if not isinstance(embed, torch.Tensor):
+                continue
+            feature[embed_key] = _pad_tensor_first_dim(embed, max_length, 0.0)
+
+            mask = feature.get(mask_key)
+            if isinstance(mask, torch.Tensor):
+                if mask.shape[0] != embed.shape[0]:
+                    raise ValueError(
+                        f"{mask_key} length ({mask.shape[0]}) must match {embed_key} length ({embed.shape[0]})."
+                    )
+                feature[mask_key] = _pad_tensor_first_dim(mask, max_length, 0)
+            elif mask is None:
+                mask = torch.ones(embed.shape[0], dtype=torch.int32)
+                feature[mask_key] = _pad_tensor_first_dim(mask, max_length, 0)
+    return features
+
+
 class OfflineDPODataset(Dataset):
-    """Dataset for rows containing offline DPO pairs plus precomputed SD3 tensors."""
+    """Dataset for rows containing offline DPO pairs plus precomputed diffusion tensors."""
 
     def __init__(self, data_files, tokenizer, processor=None, config: DictConfig | None = None, max_samples: int = -1):
         del processor
@@ -195,18 +280,48 @@ class OfflineDPODataset(Dataset):
             self.lose_key,
             "img_win_latents",
             "img_lose_latents",
-            "prompt_embeds",
-            "prompt_embeds_mask",
-            "pooled_prompt_embeds",
         }
+
         missing = required - set(self.dataframe.columns)
         if missing:
             raise ValueError(f"Offline DPO data is missing required columns: {sorted(missing)}")
 
+        self.sample_filter_fn = resolve_sample_filter_fn(config)
+        seed = config.get("seed")
+        self._sample_rng = random.Random(seed)
+
     def __len__(self) -> int:
         return len(self.dataframe)
 
+    def _resolve_sample_index(self, item: int) -> int:
+        """Return an index whose row passes ``sample_filter_fn``, resampling if needed."""
+        if self.sample_filter_fn is None:
+            return item
+
+        dataset_size = len(self.dataframe)
+        row = self.dataframe.iloc[item].to_dict()
+        if self.sample_filter_fn(row):
+            return item
+
+        max_attempts = min(dataset_size * 100, DEFAULT_SAMPLE_FILTER_MAX_ATTEMPTS)
+        for _ in range(max_attempts):
+            candidate = self._sample_rng.randrange(dataset_size)
+            row = self.dataframe.iloc[candidate].to_dict()
+            if self.sample_filter_fn(row):
+                logger.debug(
+                    "Offline DPO sample filter rejected index %s; resampled index %s.",
+                    item,
+                    candidate,
+                )
+                return candidate
+
+        raise RuntimeError(
+            f"Failed to sample an offline DPO row satisfying sample_filter_fn after {max_attempts} attempts. "
+            "Relax the filter or add more qualifying rows to the dataset."
+        )
+
     def __getitem__(self, item: int) -> dict[str, Any]:
+        item = self._resolve_sample_index(item)
         row = self.dataframe.iloc[item].to_dict()
         prompt = row[self.prompt_key]
         negative_prompt = row.get(self.negative_prompt_key, self.default_negative_prompt)
@@ -240,7 +355,7 @@ class OfflineDPODataset(Dataset):
                 pass
             return _tensor_from_column(value, dtype=dtype)
 
-        return {
+        feature = {
             OFFLINE_DPO_PAIR_MARKER: True,
             "prompts": _tokenize_prompt(prompt, self.tokenizer, self.config),
             "uid": pair_uid,
@@ -251,8 +366,7 @@ class OfflineDPODataset(Dataset):
             "img_win_latents": _tensor_from_column(row["img_win_latents"], dtype=torch.float32),
             "img_lose_latents": _tensor_from_column(row["img_lose_latents"], dtype=torch.float32),
             "prompt_embeds": _tensor_from_column(row["prompt_embeds"], dtype=torch.float32),
-            "prompt_embeds_mask": _tensor_from_column(row["prompt_embeds_mask"], dtype=torch.int32),
-            "pooled_prompt_embeds": _tensor_from_column(row["pooled_prompt_embeds"], dtype=torch.float32),
+            "prompt_embeds_mask": _optional_tensor("prompt_embeds_mask", dtype=torch.int32),
             "win_score": win_score,
             "lose_score": lose_score,
             "data_source": row.get("data_source", self.data_source),
@@ -262,6 +376,11 @@ class OfflineDPODataset(Dataset):
             "negative_prompt_embeds_mask": _optional_tensor("negative_prompt_embeds_mask", torch.int32),
             "negative_pooled_prompt_embeds": _optional_tensor("negative_pooled_prompt_embeds", torch.float32),
         }
+        pooled_prompt_embeds = _optional_tensor("pooled_prompt_embeds", torch.float32)
+        if pooled_prompt_embeds is not None:
+            feature["pooled_prompt_embeds"] = pooled_prompt_embeds
+
+        return feature
 
 
 def expand_offline_dpo_features(features: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -282,8 +401,9 @@ def expand_offline_dpo_features(features: list[dict[str, Any]]) -> list[dict[str
             "extra_info": feature["extra_info"],
             "prompt_embeds": feature["prompt_embeds"],
             "prompt_embeds_mask": feature["prompt_embeds_mask"],
-            "pooled_prompt_embeds": feature["pooled_prompt_embeds"],
         }
+        if feature.get("pooled_prompt_embeds") is not None:
+            base["pooled_prompt_embeds"] = feature["pooled_prompt_embeds"]
         for key in ("negative_prompt_embeds", "negative_prompt_embeds_mask", "negative_pooled_prompt_embeds"):
             if feature.get(key) is not None:
                 base[key] = feature[key]
@@ -291,7 +411,7 @@ def expand_offline_dpo_features(features: list[dict[str, Any]]) -> list[dict[str
             {
                 **base,
                 "image_path": feature["img_win"],
-                "image_latents": feature["img_win_latents"],
+                "latents_clean": feature["img_win_latents"],
                 "sample_level_scores": torch.tensor([feature["win_score"]], dtype=torch.float32),
                 "is_chosen": True,
             }
@@ -300,7 +420,7 @@ def expand_offline_dpo_features(features: list[dict[str, Any]]) -> list[dict[str
             {
                 **base,
                 "image_path": feature["img_lose"],
-                "image_latents": feature["img_lose_latents"],
+                "latents_clean": feature["img_lose_latents"],
                 "sample_level_scores": torch.tensor([feature["lose_score"]], dtype=torch.float32),
                 "is_chosen": False,
             }
@@ -312,4 +432,5 @@ def offline_dpo_collate_fn(features):
     """Collate offline DPO pairs after expanding each row to win/lose samples."""
     if features and isinstance(features[0], dict) and features[0].get(OFFLINE_DPO_PAIR_MARKER):
         features = expand_offline_dpo_features(features)
+    features = _pad_prompt_embed_pairs(features)
     return _upstream_collate_fn(features)
