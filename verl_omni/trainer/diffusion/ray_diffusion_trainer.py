@@ -1180,16 +1180,14 @@ class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
                     f"paired_preference requires ppo_micro_batch_size_per_gpu to be an even number >= 2, got {micro_bsz}"
                 )
         self.is_offline = config.algorithm.get("sample_source", "online") == "offline"
-        # Direct-preference losses (e.g. DPO) need ref noise preds even when KL paths are disabled.
-        self.use_reference_policy = need_reference_policy(self.config) or (
-            config.algorithm.get("trainer_type") == "direct_preference"
-        )
+        loss_mode = config.actor_rollout_ref.actor.diffusion_loss.loss_mode
+        # DPO needs trainer-side ref noise preds; DiffusionNFT computes ref in the actor engine.
+        self.use_reference_policy = need_reference_policy(self.config) or (loss_mode == "dpo")
         self._has_old_adapter = "old" in tuple(
             config.actor_rollout_ref.model.get("policy_state_adapters", ("default",))
         )
         if self._has_old_adapter:
             self._validate_old_adapter_config()
-        loss_mode = config.actor_rollout_ref.actor.diffusion_loss.loss_mode
         self._loss_fn = get_diffusion_loss_fn(loss_mode)
 
     def _validate_old_adapter_config(self):
