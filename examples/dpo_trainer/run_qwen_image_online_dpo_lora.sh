@@ -68,7 +68,7 @@ python3 -m verl_omni.trainer.main_diffusion \
     trainer.project_name=online_dpo \
     trainer.experiment_name=qwen_image_online_dpo_lora \
     trainer.log_val_generations=8 \
-    trainer.val_before_train=True \
+    trainer.val_before_train=False \
     trainer.n_gpus_per_node=$NUM_GPUS_ACTOR_ROLLOUT_REWARD \
     trainer.nnodes=1 \
     trainer.save_freq=20 \
