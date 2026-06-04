@@ -1408,9 +1408,9 @@ class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
                         batch.batch["sample_level_rewards"] = batch.batch["sample_level_scores"]
                         if self.use_reference_policy:
                             with marked_timer(str(Role.RefPolicy), timing_raw, color="olive"):
-                                ref_dpo = self._compute_ref_noise_pred(batch)
-                                if ref_dpo is not None:
-                                    batch = batch.union(ref_dpo)
+                                ref_infer_res = self._compute_ref_noise_pred(batch)
+                                if ref_infer_res is not None:
+                                    batch = batch.union(ref_infer_res)
 
                         with marked_timer("update_actor", timing_raw, color="red"):
                             actor_output = self._update_actor(batch)
@@ -1455,9 +1455,9 @@ class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
                         batch.batch["sample_level_rewards"] = batch.batch["sample_level_scores"]
                         if self.use_reference_policy:
                             with marked_timer(str(Role.RefPolicy), timing_raw, color="olive"):
-                                ref_dpo = self._compute_ref_noise_pred(batch)
-                                if ref_dpo is not None:
-                                    batch = batch.union(ref_dpo)
+                                ref_infer_res = self._compute_ref_noise_pred(batch)
+                                if ref_infer_res is not None:
+                                    batch = batch.union(ref_infer_res)
 
                         with marked_timer("update_actor", timing_raw, color="red"):
                             actor_output = self._update_actor(batch)
