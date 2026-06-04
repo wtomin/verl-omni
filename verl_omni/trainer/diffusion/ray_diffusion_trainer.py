@@ -1395,12 +1395,32 @@ class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
                 with marked_timer("step", timing_raw):
                     reward_extra_infos_dict: dict[str, list] = {}
 
-                    if not self.is_offline:
+                    if self.is_offline:
+                        reward_tensor = batch.batch["sample_level_scores"]
+
+                        with marked_timer("adv", timing_raw, color="brown"):
+                            batch.batch["sample_level_scores"] = reward_tensor
+                            if reward_extra_infos_dict:
+                                batch.non_tensor_batch.update(
+                                    {k: np.array(v) for k, v in reward_extra_infos_dict.items()}
+                                )
+
+                        batch.batch["sample_level_rewards"] = batch.batch["sample_level_scores"]
+                        if self.use_reference_policy:
+                            with marked_timer(str(Role.RefPolicy), timing_raw, color="olive"):
+                                ref_dpo = self._compute_ref_noise_pred(batch)
+                                if ref_dpo is not None:
+                                    batch = batch.union(ref_dpo)
+
+                        with marked_timer("update_actor", timing_raw, color="red"):
+                            actor_output = self._update_actor(batch)
+                    else:
                         gen_batch = self._get_gen_batch(batch)
                         gen_batch.meta_info["global_steps"] = self.global_steps
                         rollout_seed_cfg = self.config.actor_rollout_ref.rollout.get("seed")
                         if rollout_seed_cfg is not None:
                             gen_batch.meta_info["rollout_seed"] = int(rollout_seed_cfg) + self.global_steps - 1
+
                         gen_batch_output = gen_batch.repeat(
                             repeat_times=self.config.actor_rollout_ref.rollout.n,
                             interleave=True,
@@ -1423,25 +1443,26 @@ class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
                                 batch_reward = self._compute_reward_colocate(batch)
                                 batch = batch.union(batch_reward)
                             reward_tensor, reward_extra_infos_dict = extract_reward(batch)
+
+                        with marked_timer("prepare_actor_batch", timing_raw, color="brown"):
                             batch.batch["sample_level_scores"] = reward_tensor
+                            if reward_extra_infos_dict:
+                                batch.non_tensor_batch.update(
+                                    {k: np.array(v) for k, v in reward_extra_infos_dict.items()}
+                                )
+                            batch = self._prepare_actor_batch(batch, reward_tensor)
 
-                    reward_tensor = batch.batch["sample_level_scores"]
-                    with marked_timer("prepare_actor_batch", timing_raw, color="brown"):
-                        if reward_extra_infos_dict:
-                            batch.non_tensor_batch.update({k: np.array(v) for k, v in reward_extra_infos_dict.items()})
-                        batch = self._prepare_actor_batch(batch, reward_tensor)
+                        batch.batch["sample_level_rewards"] = batch.batch["sample_level_scores"]
+                        if self.use_reference_policy:
+                            with marked_timer(str(Role.RefPolicy), timing_raw, color="olive"):
+                                ref_dpo = self._compute_ref_noise_pred(batch)
+                                if ref_dpo is not None:
+                                    batch = batch.union(ref_dpo)
 
-                    batch.batch["sample_level_rewards"] = batch.batch["sample_level_scores"]
-                    if self.use_reference_policy:
-                        with marked_timer(str(Role.RefPolicy), timing_raw, color="olive"):
-                            ref_dpo = self._compute_ref_noise_pred(batch)
-                            if ref_dpo is not None:
-                                batch = batch.union(ref_dpo)
-                    # update actor
-                    with marked_timer("update_actor", timing_raw, color="red"):
-                        actor_output = self._update_actor(batch)
-                        if self._has_old_adapter:
-                            metrics.update(compute_old_policy_metrics(self._update_old_policy()))
+                        with marked_timer("update_actor", timing_raw, color="red"):
+                            actor_output = self._update_actor(batch)
+                            if self._has_old_adapter:
+                                metrics.update(compute_old_policy_metrics(self._update_old_policy()))
 
                     # Check if the ESI (Elastic Server Instance)/training plan is close to expiration.
                     esi_close_to_expiration = should_save_ckpt_esi(
