@@ -110,7 +110,16 @@ class DiffusionLossFn(ABC):
         reward_tensor: torch.Tensor,
         config: Any,
     ) -> DataProto:
-        """Prepare rollout outputs for actor update when the trainer has not already done so."""
+        """Prepare rollout outputs for actor update when the trainer has not already done so.
+
+        Reverse-process policy-gradient losses such as FlowGRPO can keep the batch
+        unchanged because their trainer path has already added ``old_log_probs`` and
+        ``advantages``. Offline DPO can also keep
+        the batch unchanged because offline preference data plus reference
+        predictions provide the loss inputs directly. Forward-process online
+        losses such as DiffusionNFT, and online DPO override this hook to turn final-latent
+        rollouts and rewards into loss-specific actor tensors.
+        """
         return batch
 
 
@@ -481,12 +490,6 @@ class DPOLoss(DiffusionLossFn):
     required_data_keys = ("ref_noise_pred", "sample_level_rewards")
 
     @staticmethod
-    def _sample_source(config: Any) -> str:
-        if hasattr(config, "algorithm"):
-            return config.algorithm.sample_source
-        return config.sample_source
-
-    @staticmethod
     def build_online_dpo_pair_indices(
         *,
         uids: np.ndarray,
@@ -545,7 +548,7 @@ class DPOLoss(DiffusionLossFn):
     ) -> DataProto:
         """Offline: no-op. Online: pick top/bottom reward pair per prompt uid."""
         rewards = reward_tensor.squeeze(-1).float() if reward_tensor.ndim > 1 else reward_tensor.float()
-        if DPOLoss._sample_source(config) == "offline":
+        if config.algorithm.sample_source == "offline":
             return batch
 
         if "uid" not in batch.non_tensor_batch:
