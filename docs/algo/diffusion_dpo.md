@@ -77,8 +77,7 @@ rejected samples.
 
 ## How VeRL-Omni Implements Diffusion-DPO
 
-VeRL-Omni runs Diffusion-DPO through the direct-preference trainer, not the
-policy-gradient trainer used by Flow-GRPO.
+VeRL-Omni runs Diffusion-DPO through the direct-preference trainer.
 
 | Layer | What it does | Code |
 |---|---|---|
