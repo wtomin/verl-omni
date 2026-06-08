@@ -262,7 +262,6 @@ def test_prepare_online_dpo_actor_batch() -> None:
     from verl import DataProto
 
     # Two prompts, two rollouts each; rewards pick high/low per uid.
-    B = 4
     uid = np.array(["p0", "p0", "p1", "p1"], dtype=object)
     rewards = torch.tensor([1.0, 0.0, 0.5, 1.0])
     batch = DataProto.from_dict(
