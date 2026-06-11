@@ -15,6 +15,4 @@
 from .flash_attention_3 import apply_flash_attention_3_varlen_hub_fix
 from .qwen_image import apply_qwen_image_ulysses_mask_fix
 
-apply_flash_attention_3_varlen_hub_fix()  # apply FA3 varlen hub fix universally
-
 __all__ = ["apply_flash_attention_3_varlen_hub_fix", "apply_qwen_image_ulysses_mask_fix"]
