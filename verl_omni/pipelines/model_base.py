@@ -67,6 +67,12 @@ class DiffusionModelBase(ABC):
             import_external_libs(model_config.external_lib)
 
         try:
+            if architecture == "QwenImagePipeline":
+                # TODO (mike): It was fixed in diffusers main branch.
+                # Remove this patch once we upgrade the diffusers version.
+                from verl_omni.models.diffusers.qwen_image import apply_qwen_image_ulysses_mask_fix
+
+                apply_qwen_image_ulysses_mask_fix()
             return cls._registry[key]
         except KeyError:
             registered = sorted(cls._registry.keys())
