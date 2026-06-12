@@ -316,8 +316,8 @@ def _assign_split(video_id: str, test_ratio: float, seed: int) -> str:
     return "test" if bucket < test_ratio else "train"
 
 
-def _relative_path(path: Path, base_dir: Path) -> str:
-    return path.relative_to(base_dir).as_posix()
+def _absolute_path(path: Path) -> str:
+    return path.resolve().as_posix()
 
 
 def _prepare_segment(
@@ -362,8 +362,8 @@ def _prepare_segment(
     return PreparedSegment(
         candidate=candidate,
         split=split,
-        audio_relpath=_relative_path(audio_path, output_dir),
-        image_relpaths=[_relative_path(segment_dir / name, output_dir) for name in frame_names],
+        audio_relpath=_absolute_path(audio_path),
+        image_relpaths=[_absolute_path(segment_dir / name) for name in frame_names],
         frame_names=frame_names,
     )
 
