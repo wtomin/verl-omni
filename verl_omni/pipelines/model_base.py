@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import logging
 from abc import ABC, abstractmethod
 from typing import Optional
 
@@ -20,6 +21,8 @@ from diffusers import ModelMixin, SchedulerMixin
 from tensordict import TensorDict
 
 from verl_omni.workers.config import DiffusionModelConfig
+
+logger = logging.getLogger(__name__)
 
 
 class DiffusionModelBase(ABC):
@@ -68,8 +71,11 @@ class DiffusionModelBase(ABC):
 
         try:
             if architecture == "QwenImagePipeline":
-                # TODO (mike): It was fixed in diffusers main branch.
-                # Remove this patch once we upgrade the diffusers version.
+                logger.info(
+                    "Applying monkey-patch for QwenImageTransformer2DModel Ulysses SP "
+                    "This workaround will be removed once we upgrade to a diffusers release that "
+                    "includes the upstream fix."
+                )
                 from verl_omni.models.diffusers.qwen_image import apply_qwen_image_ulysses_mask_fix
 
                 apply_qwen_image_ulysses_mask_fix()
