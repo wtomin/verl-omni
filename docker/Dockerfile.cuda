@@ -22,7 +22,7 @@ ARG DEBIAN_FRONTEND=noninteractive
 # install.md: Python >= 3.10 (3.12 recommended), CUDA >= 12.8
 ENV PYTHONUNBUFFERED=1 \
     UV_LINK_MODE=copy \
-    UV_COMPILE_BYTECODE=1 \
+    UV_COMPILE_BYTECODE=0 \
     UV_PYTHON_DOWNLOADS=manual \
     VIRTUAL_ENV=/opt/venv \
     PATH="/root/.local/bin:/opt/venv/bin:${PATH}" \
@@ -35,8 +35,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# Same toolchain as install.md (`uv venv --python 3.12 --seed`)
-RUN curl -LsSf https://astral.sh/uv/install.sh | sh \
+# Raise nofile limit: uv stdlib bytecode compile opens many files at once.
+RUN ulimit -n 65536 \
+    && curl -LsSf https://astral.sh/uv/install.sh | sh \
     && uv python install 3.12 \
     && uv venv "${VIRTUAL_ENV}" --python 3.12 --seed
 
