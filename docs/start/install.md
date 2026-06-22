@@ -120,9 +120,9 @@ python -c "import verl; print('verl', verl.__version__)"
 python -c "import verl_omni; print('VeRL-Omni ready')"
 ```
 
-## Build your own Docker image
+## Build Your Own Docker Image
 
-The repository ships a CUDA Dockerfile at [`docker/Dockerfile.cuda`](https://github.com/verl-project/verl-omni/blob/main/docker/Dockerfile.cuda). The default base image uses **CUDA 12.9.1** on Ubuntu 22.04 (override with `--build-arg CUDA_VERSION=…` if needed). Build context is controlled by the repo-root [`.dockerignore`](https://github.com/verl-project/verl-omni/blob/main/.dockerignore); keep large local folders such as `.venv`, `data/`, and `checkpoints/` out of the context.
+The repository has a CUDA Dockerfile at [`docker/Dockerfile.cuda`](https://github.com/verl-project/verl-omni/blob/main/docker/Dockerfile.cuda). The default base image uses **CUDA 12.9.1** on Ubuntu 22.04 (override with `--build-arg CUDA_VERSION=…` if needed). Build context is controlled by the repo-root [`.dockerignore`](https://github.com/verl-project/verl-omni/blob/main/.dockerignore); keep large local folders such as `.venv`, `data/`, and `checkpoints/` out of the context.
 
 ### Prerequisites
 
@@ -137,7 +137,7 @@ From the repository root:
 # Standard GPU training image (runtime target)
 docker build -f docker/Dockerfile.cuda -t verl-omni:gpu .
 
-# FlowGRPO OCR reward (adds the `ocr` extra / Levenshtein)
+# OCR reward (adds the `ocr` extra / Levenshtein)
 docker build -f docker/Dockerfile.cuda --target ocr -t verl-omni:gpu-ocr .
 
 # Local development tools (adds the `dev` extra)
