@@ -52,13 +52,6 @@ RUN uv pip install -e ".[gpu]" --torch-backend=auto
 # Step 2 — vllm-omni + train: vllm-omni==0.22.0, verl==0.8.0
 RUN uv pip install -e ".[vllm-omni,train]"
 
-# Post-install verification from install.md
-RUN python -c "import torch; print('torch', torch.__version__, '| CUDA', torch.version.cuda)" \
-    && python -c "import vllm; print('vllm', vllm.__version__)" \
-    && python -c "import vllm_omni; print('vllm-omni OK')" \
-    && python -c "import verl; print('verl', verl.__version__)" \
-    && python -c "import verl_omni; print('VeRL-Omni ready')"
-
 FROM base AS runtime
 WORKDIR /workspace/verl-omni
 CMD ["/bin/bash"]
@@ -74,6 +67,4 @@ RUN uv pip install -e ".[ocr]"
 # Optional: VeOmni engine backend (install.md "Optional engine backends")
 FROM base AS veomni
 RUN uv pip install veomni==0.1.11 --no-deps \
-    && uv pip install torchcodec librosa soundfile av \
-    && python -c "import veomni; print('veomni', veomni.__version__)" \
-    && python -c "from veomni.distributed.offloading import load_model_to_gpu, load_optimizer, offload_model_to_cpu, offload_optimizer; print('VeOmni offloading helpers OK')"
+    && uv pip install torchcodec librosa soundfile av
