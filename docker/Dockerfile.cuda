@@ -16,7 +16,7 @@
 # Run:
 #   docker run --gpus all --shm-size=16g -it verl-omni:gpu
 
-ARG CUDA_VERSION=12.9.1
+ARG CUDA_VERSION=13.0.2
 ARG UBUNTU_VERSION=22.04
 ARG VLLM_VERSION=0.22.0
 ARG KERNELS_VERSION=0.14.1
@@ -31,7 +31,7 @@ ARG KERNELS_VERSION
 ARG VLLM_OMNI_VERSION
 ARG VERL_VERSION
 
-# install.md: Python >= 3.10 (3.12 recommended), CUDA >= 12.8
+# Python >= 3.10 (3.12 recommended), CUDA >= 12.8
 ENV PYTHONUNBUFFERED=1 \
     UV_LINK_MODE=copy \
     UV_COMPILE_BYTECODE=0 \
@@ -79,15 +79,15 @@ FROM base AS runtime
 WORKDIR /workspace/verl-omni
 CMD ["/bin/bash"]
 
-# Optional: install.md dev extra (pytest, pre-commit, Levenshtein, …)
+# Optional: dev extra (pytest, pre-commit, Levenshtein, …)
 FROM base AS dev
 RUN uv pip install -e ".[dev]"
 
-# Optional: install.md ocr extra (FlowGRPO OCR reward)
+# Optional: ocr extra (FlowGRPO OCR reward)
 FROM base AS ocr
 RUN uv pip install -e ".[ocr]"
 
-# Optional: VeOmni engine backend (install.md "Optional engine backends")
+# Optional: VeOmni engine backend ("Optional engine backends")
 FROM base AS veomni
 RUN uv pip install veomni==0.1.11 --no-deps \
     && uv pip install torchcodec librosa soundfile av
