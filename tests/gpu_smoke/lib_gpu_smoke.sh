@@ -29,6 +29,7 @@ gpu_smoke_init() {
     shift 2
 
     REQUESTED_NUM_GPUS="${NUM_GPUS:-${default_num_gpus}}"
+    REQUESTED_CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-}"
     while [[ $# -gt 0 ]]; do
         case "$1" in
             -g|--num-gpus)
@@ -43,14 +44,27 @@ gpu_smoke_init() {
                 REQUESTED_NUM_GPUS="${1#*=}"
                 shift
                 ;;
+            --cuda-visible-devices)
+                if [[ $# -lt 2 ]]; then
+                    fail "Missing value for $1 (example: 0,1)"
+                    exit 2
+                fi
+                REQUESTED_CUDA_VISIBLE_DEVICES="$2"
+                shift 2
+                ;;
+            --cuda-visible-devices=*)
+                REQUESTED_CUDA_VISIBLE_DEVICES="${1#*=}"
+                shift
+                ;;
             -h|--help)
                 cat <<EOF
 Usage:
-  bash ${BASH_SOURCE[1]:-$0} [--num-gpus N]
+  bash ${BASH_SOURCE[1]:-$0} [--num-gpus N] [--cuda-visible-devices DEVICES]
 
 Options:
-  -g, --num-gpus N    GPU count to run with (allowed: 1, 2, 4, 8)
-  -h, --help          Show this help message
+  -g, --num-gpus N              GPU count to run with (allowed: 1, 2, 4, 8)
+      --cuda-visible-devices    Comma-separated GPU IDs to expose
+  -h, --help                    Show this help message
 EOF
                 exit 0
                 ;;
@@ -74,7 +88,9 @@ EOF
     esac
 
     export NUM_GPUS="${REQUESTED_NUM_GPUS}"
-    if [[ "${NUM_GPUS}" -gt 0 ]]; then
+    if [[ -n "${REQUESTED_CUDA_VISIBLE_DEVICES}" ]]; then
+        CUDA_DEVICE_LIST="${REQUESTED_CUDA_VISIBLE_DEVICES}"
+    elif [[ "${NUM_GPUS}" -gt 0 ]]; then
         CUDA_DEVICE_LIST="$(build_cuda_device_list "${NUM_GPUS}")"
     else
         CUDA_DEVICE_LIST=""
@@ -116,7 +132,9 @@ run_test() {
     local id="$1"; local name="$2"; shift 2
     local logfile="${LOG_DIR}/test_${id}.log"
 
-    ray stop --force 2>/dev/null || true
+    if [[ "${GPU_SMOKE_SKIP_RAY_STOP:-0}" != "1" ]]; then
+        ray stop --force 2>/dev/null || true
+    fi
 
     sep
     log "Starting  [${id}] ${name}"
