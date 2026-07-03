@@ -21,7 +21,7 @@ on:
     branches:
       - main
       - v0.*
-    types: [labeled, synchronize]
+    types: [labeled]
     paths:
       - "verl_omni/**"
       - "tests/gpu_smoke/**"
