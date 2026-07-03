@@ -53,56 +53,63 @@ env:
   HF_HUB_ENABLE_HF_TRANSFER: "0"
 
 jobs:
-  setup:
+  setup_core_runner:
     # Pull request label mapping:
-    #   ready-for-ci               -> all GPU smoke groups
+    #   ready-for-ci               -> all GPU smoke groups in parallel
     #   gpu-smoke-core             -> core group on one 2-GPU runner
     #   gpu-smoke-e2e              -> e2e group only
     #   gpu-smoke-reward-e2e       -> reward e2e group only
-    # Push events also run all groups.
+    # Push events also run all groups in parallel.
     if: >-
       github.repository_owner == 'verl-project' && (
         github.event_name != 'pull_request' ||
         github.event.label.name == 'ready-for-ci' ||
-        github.event.label.name == 'gpu-smoke-core' ||
-        github.event.label.name == 'gpu-smoke-e2e' ||
-        github.event.label.name == 'gpu-smoke-reward-e2e'
+        github.event.label.name == 'gpu-smoke-core'
       )
     runs-on: ubuntu-latest
     outputs:
       core-runner-label: ${{ steps.create-core-runner.outputs.runner-label }}
       core-mlp-task-id: ${{ steps.create-core-runner.outputs.mlp-task-id }}
+    steps:
+      - id: create-core-runner
+        uses: volcengine/vemlp-github-runner@v1
+        with:
+          mode: "create"
+          faas-url: "${{ env.DYNAMIC_RUNNER_ENDPOINT }}"
+          mlp-image: "${{ env.IMAGE }}"
+
+  setup_e2e_runner:
+    if: >-
+      github.repository_owner == 'verl-project' && (
+        github.event_name != 'pull_request' ||
+        github.event.label.name == 'ready-for-ci' ||
+        github.event.label.name == 'gpu-smoke-e2e'
+      )
+    runs-on: ubuntu-latest
+    outputs:
       e2e-runner-label: ${{ steps.create-e2e-runner.outputs.runner-label }}
       e2e-mlp-task-id: ${{ steps.create-e2e-runner.outputs.mlp-task-id }}
+    steps:
+      - id: create-e2e-runner
+        uses: volcengine/vemlp-github-runner@v1
+        with:
+          mode: "create"
+          faas-url: "${{ env.DYNAMIC_RUNNER_ENDPOINT }}"
+          mlp-image: "${{ env.IMAGE }}"
+
+  setup_reward_e2e_runner:
+    if: >-
+      github.repository_owner == 'verl-project' && (
+        github.event_name != 'pull_request' ||
+        github.event.label.name == 'ready-for-ci' ||
+        github.event.label.name == 'gpu-smoke-reward-e2e'
+      )
+    runs-on: ubuntu-latest
+    outputs:
       reward-e2e-runner-label: ${{ steps.create-reward-e2e-runner.outputs.runner-label }}
       reward-e2e-mlp-task-id: ${{ steps.create-reward-e2e-runner.outputs.mlp-task-id }}
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-      - id: create-core-runner
-        if: >-
-          github.event_name != 'pull_request' ||
-          github.event.label.name == 'ready-for-ci' ||
-          github.event.label.name == 'gpu-smoke-core'
-        uses: volcengine/vemlp-github-runner@v1
-        with:
-          mode: "create"
-          faas-url: "${{ env.DYNAMIC_RUNNER_ENDPOINT }}"
-          mlp-image: "${{ env.IMAGE }}"
-      - id: create-e2e-runner
-        if: >-
-          github.event_name != 'pull_request' ||
-          github.event.label.name == 'ready-for-ci' ||
-          github.event.label.name == 'gpu-smoke-e2e'
-        uses: volcengine/vemlp-github-runner@v1
-        with:
-          mode: "create"
-          faas-url: "${{ env.DYNAMIC_RUNNER_ENDPOINT }}"
-          mlp-image: "${{ env.IMAGE }}"
       - id: create-reward-e2e-runner
-        if: >-
-          github.event_name != 'pull_request' ||
-          github.event.label.name == 'ready-for-ci' ||
-          github.event.label.name == 'gpu-smoke-reward-e2e'
         uses: volcengine/vemlp-github-runner@v1
         with:
           mode: "create"
@@ -110,12 +117,12 @@ jobs:
           mlp-image: "${{ env.IMAGE }}"
 
   gpu_smoke_core_2gpu:
-    needs: setup
+    needs: setup_core_runner
     if: >-
       github.event_name != 'pull_request' ||
       github.event.label.name == 'ready-for-ci' ||
       github.event.label.name == 'gpu-smoke-core'
-    runs-on: ["${{ needs.setup.outputs.core-runner-label || 'L20x2' }}"]
+    runs-on: ["${{ needs.setup_core_runner.outputs.core-runner-label || 'L20x2' }}"]
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -130,12 +137,12 @@ jobs:
         uses: ./.github/actions/gpu-smoke-upload-logs
 
   gpu_smoke_e2e_2gpu:
-    needs: setup
+    needs: setup_e2e_runner
     if: >-
       github.event_name != 'pull_request' ||
       github.event.label.name == 'ready-for-ci' ||
       github.event.label.name == 'gpu-smoke-e2e'
-    runs-on: ["${{ needs.setup.outputs.e2e-runner-label || 'L20x2' }}"]
+    runs-on: ["${{ needs.setup_e2e_runner.outputs.e2e-runner-label || 'L20x2' }}"]
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -150,12 +157,12 @@ jobs:
         uses: ./.github/actions/gpu-smoke-upload-logs
 
   gpu_smoke_reward_e2e_4gpu:
-    needs: setup
+    needs: setup_reward_e2e_runner
     if: >-
       github.event_name != 'pull_request' ||
       github.event.label.name == 'ready-for-ci' ||
       github.event.label.name == 'gpu-smoke-reward-e2e'
-    runs-on: ["${{ needs.setup.outputs.reward-e2e-runner-label || 'L20x4' }}"]
+    runs-on: ["${{ needs.setup_reward_e2e_runner.outputs.reward-e2e-runner-label || 'L20x4' }}"]
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -171,27 +178,33 @@ jobs:
 
   cleanup:
     runs-on: ubuntu-latest
-    needs: [setup, gpu_smoke_core_2gpu, gpu_smoke_e2e_2gpu, gpu_smoke_reward_e2e_4gpu]
+    needs:
+      - setup_core_runner
+      - setup_e2e_runner
+      - setup_reward_e2e_runner
+      - gpu_smoke_core_2gpu
+      - gpu_smoke_e2e_2gpu
+      - gpu_smoke_reward_e2e_4gpu
     if: always()
     steps:
       - id: destroy-core-runner
-        if: needs.setup.outputs.core-mlp-task-id != ''
+        if: needs.setup_core_runner.outputs.core-mlp-task-id != ''
         uses: volcengine/vemlp-github-runner@v1
         with:
           mode: "destroy"
           faas-url: "${{ env.DYNAMIC_RUNNER_ENDPOINT }}"
-          mlp-task-id: "${{ needs.setup.outputs.core-mlp-task-id }}"
+          mlp-task-id: "${{ needs.setup_core_runner.outputs.core-mlp-task-id }}"
       - id: destroy-e2e-runner
-        if: needs.setup.outputs.e2e-mlp-task-id != ''
+        if: needs.setup_e2e_runner.outputs.e2e-mlp-task-id != ''
         uses: volcengine/vemlp-github-runner@v1
         with:
           mode: "destroy"
           faas-url: "${{ env.DYNAMIC_RUNNER_ENDPOINT }}"
-          mlp-task-id: "${{ needs.setup.outputs.e2e-mlp-task-id }}"
+          mlp-task-id: "${{ needs.setup_e2e_runner.outputs.e2e-mlp-task-id }}"
       - id: destroy-reward-e2e-runner
-        if: needs.setup.outputs.reward-e2e-mlp-task-id != ''
+        if: needs.setup_reward_e2e_runner.outputs.reward-e2e-mlp-task-id != ''
         uses: volcengine/vemlp-github-runner@v1
         with:
           mode: "destroy"
           faas-url: "${{ env.DYNAMIC_RUNNER_ENDPOINT }}"
-          mlp-task-id: "${{ needs.setup.outputs.reward-e2e-mlp-task-id }}"
+          mlp-task-id: "${{ needs.setup_reward_e2e_runner.outputs.reward-e2e-mlp-task-id }}"
