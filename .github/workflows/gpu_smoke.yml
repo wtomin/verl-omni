@@ -21,7 +21,7 @@ on:
     branches:
       - main
       - v0.*
-    types: [labeled]
+    types: [labeled, synchronize]
     paths:
       - "verl_omni/**"
       - "tests/gpu_smoke/**"
@@ -63,8 +63,8 @@ jobs:
     if: >-
       github.repository_owner == 'verl-project' && (
         github.event_name != 'pull_request' ||
-        github.event.label.name == 'ready-for-ci' ||
-        github.event.label.name == 'gpu-smoke-core'
+        contains(github.event.pull_request.labels.*.name, 'ready-for-ci') ||
+        contains(github.event.pull_request.labels.*.name, 'gpu-smoke-core')
       )
     runs-on: ubuntu-latest
     outputs:
@@ -82,8 +82,8 @@ jobs:
     if: >-
       github.repository_owner == 'verl-project' && (
         github.event_name != 'pull_request' ||
-        github.event.label.name == 'ready-for-ci' ||
-        github.event.label.name == 'gpu-smoke-e2e'
+        contains(github.event.pull_request.labels.*.name, 'ready-for-ci') ||
+        contains(github.event.pull_request.labels.*.name, 'gpu-smoke-e2e')
       )
     runs-on: ubuntu-latest
     outputs:
@@ -101,8 +101,8 @@ jobs:
     if: >-
       github.repository_owner == 'verl-project' && (
         github.event_name != 'pull_request' ||
-        github.event.label.name == 'ready-for-ci' ||
-        github.event.label.name == 'gpu-smoke-reward-e2e'
+        contains(github.event.pull_request.labels.*.name, 'ready-for-ci') ||
+        contains(github.event.pull_request.labels.*.name, 'gpu-smoke-reward-e2e')
       )
     runs-on: ubuntu-latest
     outputs:
@@ -120,8 +120,8 @@ jobs:
     needs: setup_core_runner
     if: >-
       github.event_name != 'pull_request' ||
-      github.event.label.name == 'ready-for-ci' ||
-      github.event.label.name == 'gpu-smoke-core'
+      contains(github.event.pull_request.labels.*.name, 'ready-for-ci') ||
+      contains(github.event.pull_request.labels.*.name, 'gpu-smoke-core')
     runs-on: ["${{ needs.setup_core_runner.outputs.core-runner-label || 'L20x2' }}"]
     timeout-minutes: 45
     steps:
@@ -140,8 +140,8 @@ jobs:
     needs: setup_e2e_runner
     if: >-
       github.event_name != 'pull_request' ||
-      github.event.label.name == 'ready-for-ci' ||
-      github.event.label.name == 'gpu-smoke-e2e'
+      contains(github.event.pull_request.labels.*.name, 'ready-for-ci') ||
+      contains(github.event.pull_request.labels.*.name, 'gpu-smoke-e2e')
     runs-on: ["${{ needs.setup_e2e_runner.outputs.e2e-runner-label || 'L20x2' }}"]
     timeout-minutes: 45
     steps:
@@ -160,8 +160,8 @@ jobs:
     needs: setup_reward_e2e_runner
     if: >-
       github.event_name != 'pull_request' ||
-      github.event.label.name == 'ready-for-ci' ||
-      github.event.label.name == 'gpu-smoke-reward-e2e'
+      contains(github.event.pull_request.labels.*.name, 'ready-for-ci') ||
+      contains(github.event.pull_request.labels.*.name, 'gpu-smoke-reward-e2e')
     runs-on: ["${{ needs.setup_reward_e2e_runner.outputs.reward-e2e-runner-label || 'L20x4' }}"]
     timeout-minutes: 45
     steps:
