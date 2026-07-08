@@ -212,8 +212,8 @@ def _base_row(record: dict, split: str, index: int, source: str, question: str) 
 
     return {
         "data_source": spec["data_source"],
-        "answer_win": chosen,
-        "answer_lose": rejected,
+        "chosen": chosen,
+        "rejected": rejected,
         "win_score": float(record.get("chosen_score", 1.0)),
         "lose_score": float(record.get("rejected_score", 0.0)),
         "ability": spec["ability"],
