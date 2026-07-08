@@ -50,12 +50,32 @@ from verl_omni.models.transformers.qwen3_omni_thinker import apply_qwen3_omni_th
 
 DEFAULT_OUTPUT_DIR = os.path.expanduser("~/models/tiny-random/Qwen3-Omni")
 
-# Minimal ChatML template (verl's dataset loader calls apply_chat_template).
+# Minimal ChatML template for the smoke checkpoint. It only supports text,
+# image, video, and audio message content; tools/reasoning/tool-calls are
+# intentionally omitted because the e2e tests do not exercise them.
 _CHATML_TEMPLATE = (
     "{% for message in messages %}"
-    "{{'<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>' + '\n'}}"
+    "{{ '<|im_start|>' + message['role'] + '\n' }}"
+    "{% if message['content'] is string %}"
+    "{{ message['content'] }}"
+    "{% else %}"
+    "{% for content in message['content'] %}"
+    "{% if content['type'] == 'text' %}"
+    "{{ content['text'] }}"
+    "{% elif content['type'] == 'image' %}"
+    "{{ '<|vision_start|><|image_pad|><|vision_end|>' }}"
+    "{% elif content['type'] == 'video' %}"
+    "{{ '<|vision_start|><|video_pad|><|vision_end|>' }}"
+    "{% elif content['type'] == 'audio' %}"
+    "{{ '<|audio_start|><|audio_pad|><|audio_end|>' }}"
+    "{% endif %}"
     "{% endfor %}"
-    "{% if add_generation_prompt %}{{'<|im_start|>assistant\n'}}{% endif %}"
+    "{% endif %}"
+    "{{ '<|im_end|>\n' }}"
+    "{% endfor %}"
+    "{% if add_generation_prompt %}"
+    "{{ '<|im_start|>assistant\n' }}"
+    "{% endif %}"
 )
 
 # Multimodal special tokens Qwen3OmniMoeProcessor expects on the tokenizer
