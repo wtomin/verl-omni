@@ -34,6 +34,10 @@ from PIL import Image
 SYSTEM_PROMPT = "You are a helpful assistant."
 
 
+def _content_item(item_type: str, *, text: str | None = None, image="", video="", audio="") -> dict:
+    return {"type": item_type, "text": text, "image": image, "video": video, "audio": audio}
+
+
 def _write_png(path: str, color: tuple[int, int, int]) -> str:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     Image.new("RGB", (64, 64), color=color).save(path)
@@ -76,12 +80,12 @@ def _image_row(split: str, index: int, image_path: str) -> dict:
     question = "What is shown in this dummy image?"
     row = _base_row(split, "image", index, question)
     row["prompt"] = [
-        {"role": "system", "content": [{"type": "text", "text": SYSTEM_PROMPT}]},
+        {"role": "system", "content": [_content_item("text", text=SYSTEM_PROMPT)]},
         {
             "role": "user",
             "content": [
-                {"type": "image", "image": image_path},
-                {"type": "text", "text": question},
+                _content_item("image", image=image_path),
+                _content_item("text", text=question),
             ],
         },
     ]
@@ -93,8 +97,8 @@ def _text_row(split: str, index: int) -> dict:
     question = "Answer this dummy text-only preference question."
     row = _base_row(split, "text", index, question)
     row["prompt"] = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": question},
+        {"role": "system", "content": [_content_item("text", text=SYSTEM_PROMPT)]},
+        {"role": "user", "content": [_content_item("text", text=question)]},
     ]
     return row
 
@@ -103,12 +107,12 @@ def _video_row(split: str, index: int, frame_paths: list[str]) -> dict:
     question = "What changes across the dummy video frames?"
     row = _base_row(split, "video", index, question)
     row["prompt"] = [
-        {"role": "system", "content": [{"type": "text", "text": SYSTEM_PROMPT}]},
+        {"role": "system", "content": [_content_item("text", text=SYSTEM_PROMPT)]},
         {
             "role": "user",
             "content": [
-                {"type": "video", "video": frame_paths},
-                {"type": "text", "text": question},
+                _content_item("video", video=os.path.dirname(frame_paths[0])),
+                _content_item("text", text=question),
             ],
         },
     ]
