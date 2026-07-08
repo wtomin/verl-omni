@@ -39,6 +39,8 @@ from pathlib import Path
 import pandas as pd
 
 SYSTEM_PROMPT = "You are a helpful assistant."
+VIDEO_FILE_EXTENSIONS = (".mp4", ".webm", ".mkv", ".mov", ".avi")
+FRAME_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
 ANNOTATION_URL = (
     "https://huggingface.co/datasets/ShareGPTVideo/train_video_and_instruction"
     "/resolve/main/video_instruction/train/dpo/sft_dpo_17k.jsonl?download=true"
@@ -49,21 +51,20 @@ SOURCE_SPECS = {
         "data_source": "llava_hound_dpo/image",
         "ability": "image_qa",
         "name": "LLaVA-Hound-DPO-Image",
-        "weight": 0.4,
     },
     "text": {
         "data_source": "llava_hound_dpo/text",
         "ability": "text_qa",
         "name": "LLaVA-Hound-DPO-Text",
-        "weight": 0.2,
     },
     "video": {
         "data_source": "llava_hound_dpo/video",
         "ability": "video_qa",
         "name": "LLaVA-Hound-DPO-Video",
-        "weight": 0.4,
     },
 }
+
+SOURCE_ORDER = ["image", "text", "video"]
 
 
 def _strip_video_token(text: str) -> str:
@@ -75,15 +76,35 @@ def _video_key(video_rel: str) -> str:
     return Path(video_rel.replace("\\", "/")).name or video_rel
 
 
-def _resolve_video(video_rel: str, video_dir: str) -> str | None:
-    candidate = os.path.join(video_dir, video_rel)
-    if os.path.isfile(candidate):
-        return os.path.abspath(candidate)
+def _frame_paths_for_dir(path: str) -> list[str]:
+    frames = [
+        os.path.abspath(os.path.join(path, name))
+        for name in os.listdir(path)
+        if os.path.isfile(os.path.join(path, name)) and Path(name).suffix.lower() in FRAME_IMAGE_EXTENSIONS
+    ]
+    return sorted(frames)
 
-    stripped = video_rel.lstrip("/").lstrip("\\")
-    candidate = os.path.join(video_dir, stripped)
-    if os.path.isfile(candidate):
-        return os.path.abspath(candidate)
+
+def _resolve_video(video_rel: str, video_dir: str) -> str | list[str] | None:
+    for rel in (video_rel, video_rel.lstrip("/").lstrip("\\")):
+        candidate = os.path.join(video_dir, rel)
+        if os.path.isfile(candidate):
+            return os.path.abspath(candidate)
+        if os.path.isdir(candidate):
+            frames = _frame_paths_for_dir(candidate)
+            if frames:
+                return frames
+        if not Path(rel).suffix:
+            for extension in VIDEO_FILE_EXTENSIONS:
+                candidate_with_extension = candidate + extension
+                if os.path.isfile(candidate_with_extension):
+                    return os.path.abspath(candidate_with_extension)
+    return None
+
+
+def _first_frame(video_media: str | list[str]) -> str | None:
+    if isinstance(video_media, list):
+        return video_media[0] if video_media else None
     return None
 
 
@@ -161,16 +182,27 @@ def _split_video_keys(records: list[dict], test_ratio: float, seed: int) -> set[
     return test_keys
 
 
+def _text_value(value: object) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, dict):
+        return str(value.get("value", "")).strip()
+    return str(value).strip()
+
+
 def _question(record: dict) -> str:
     for turn in record.get("conversations", []):
         if turn.get("from") == "human":
             return _strip_video_token(turn.get("value", ""))
+    prompt = _text_value(record.get("prompt"))
+    if prompt:
+        return _strip_video_token(prompt)
     return ""
 
 
 def _base_row(record: dict, split: str, index: int, source: str, question: str) -> dict | None:
-    chosen = record.get("chosen", {}).get("value", "")
-    rejected = record.get("rejected", {}).get("value", "")
+    chosen = _text_value(record.get("chosen"))
+    rejected = _text_value(record.get("rejected"))
     if not question or not chosen or not rejected:
         return None
 
@@ -180,8 +212,10 @@ def _base_row(record: dict, split: str, index: int, source: str, question: str) 
 
     return {
         "data_source": spec["data_source"],
-        "chosen": chosen,
-        "rejected": rejected,
+        "answer_win": chosen,
+        "answer_lose": rejected,
+        "win_score": float(record.get("chosen_score", 1.0)),
+        "lose_score": float(record.get("rejected_score", 0.0)),
         "ability": spec["ability"],
         "reward_model": {"style": "preference"},
         "extra_info": {
@@ -208,8 +242,8 @@ def _build_text_row(record: dict, split: str, index: int) -> dict | None:
 
 
 def _build_video_row(record: dict, split: str, index: int, video_dir: str) -> dict | None:
-    video_path = _resolve_video(record.get("video", ""), video_dir)
-    if video_path is None:
+    video_media = _resolve_video(record.get("video", ""), video_dir)
+    if video_media is None:
         return None
 
     question = _question(record)
@@ -217,16 +251,20 @@ def _build_video_row(record: dict, split: str, index: int, video_dir: str) -> di
     if row is None:
         return None
     row["prompt"] = [
-        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "content": [{"type": "text", "text": SYSTEM_PROMPT}]},
         {
             "role": "user",
             "content": [
-                {"type": "video", "video": video_path},
+                {"type": "video", "video": video_media},
                 {"type": "text", "text": question},
             ],
         },
     ]
-    row["extra_info"]["video_path"] = video_path
+    if isinstance(video_media, list):
+        row["extra_info"]["video_frame_count"] = len(video_media)
+        row["extra_info"]["video_frame_dir"] = os.path.dirname(video_media[0])
+    else:
+        row["extra_info"]["video_path"] = video_media
     return row
 
 
@@ -239,15 +277,21 @@ def _build_image_row(
     extract_images: bool,
 ) -> dict | None:
     video_rel = record.get("video", "")
-    video_path = _resolve_video(video_rel, video_dir)
-    if video_path is None:
+    video_media = _resolve_video(video_rel, video_dir)
+    if video_media is None:
         return None
 
-    image_path = _image_path_for_video(video_rel, image_dir)
-    if not os.path.isfile(image_path):
-        if not extract_images:
-            return None
-        if not _extract_first_frame(video_path, image_path):
+    first_frame = _first_frame(video_media)
+    if first_frame is not None:
+        image_path = first_frame
+    else:
+        image_path = _image_path_for_video(video_rel, image_dir)
+        if not os.path.isfile(image_path):
+            if not extract_images:
+                return None
+            if not isinstance(video_media, str) or not _extract_first_frame(video_media, image_path):
+                return None
+        if not os.path.isfile(image_path):
             return None
 
     question = _question(record)
@@ -255,7 +299,7 @@ def _build_image_row(
     if row is None:
         return None
     row["prompt"] = [
-        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "content": [{"type": "text", "text": SYSTEM_PROMPT}]},
         {
             "role": "user",
             "content": [
@@ -264,7 +308,11 @@ def _build_image_row(
             ],
         },
     ]
-    row["extra_info"]["video_path"] = video_path
+    if isinstance(video_media, list):
+        row["extra_info"]["video_frame_count"] = len(video_media)
+        row["extra_info"]["video_frame_dir"] = os.path.dirname(video_media[0])
+    else:
+        row["extra_info"]["video_path"] = video_media
     row["extra_info"]["image_path"] = image_path
     return row
 
@@ -280,21 +328,25 @@ def _write_split(rows: list[dict], output_dir: str, source: str) -> None:
     print(f"  {source}: train={len(train_rows):,}, test={len(test_rows):,}", flush=True)
 
 
-def _write_multisource_config(output_dir: str) -> None:
-    source_order = ["image", "text", "video"]
-    config_path = os.path.join(output_dir, "llava_hound_dpo_multisource.yaml")
+def _default_multisource_config_path() -> str:
+    repo_example_dir = Path(__file__).resolve().parent.parent / "qwen3_omni"
+    return os.fspath(repo_example_dir / "llava_hound_dpo_multisource.yaml")
+
+
+def _write_multisource_config(output_dir: str, config_path: str, source_weights: list[float]) -> None:
     lines = [
         "sources:",
-        *[f"- {os.path.join(output_dir, source, 'train.parquet')}" for source in source_order],
+        *[f"- {os.path.join(output_dir, source, 'train.parquet')}" for source in SOURCE_ORDER],
         "names:",
-        *[f"- {SOURCE_SPECS[source]['name']}" for source in source_order],
+        *[f"- {SOURCE_SPECS[source]['name']}" for source in SOURCE_ORDER],
         "schedule:",
         "- schedule_type: const",
-        "  weights: [0.4, 0.2, 0.4]",
+        f"  weights: [{', '.join(str(weight) for weight in source_weights)}]",
         "val_sources:",
-        *[f"- {os.path.join(output_dir, source, 'test.parquet')}" for source in source_order],
+        *[f"- {os.path.join(output_dir, source, 'test.parquet')}" for source in SOURCE_ORDER],
         "",
     ]
+    os.makedirs(os.path.dirname(config_path), exist_ok=True)
     with open(config_path, "w", encoding="utf-8") as fh:
         fh.write("\n".join(lines))
     print(f"  config: {config_path}", flush=True)
@@ -314,7 +366,20 @@ def main() -> None:
     parser.add_argument(
         "--output_dir",
         default=os.path.expanduser("~/data/llava_hound_dpo/parquet"),
-        help="Directory to write image/text/video parquet folders and multisource config.",
+        help="Directory to write image/text/video parquet folders.",
+    )
+    parser.add_argument(
+        "--source_weights",
+        nargs=3,
+        type=float,
+        required=True,
+        metavar=("IMAGE_WEIGHT", "TEXT_WEIGHT", "VIDEO_WEIGHT"),
+        help="Sampling weights for image, text, and video sources in the generated multisource YAML.",
+    )
+    parser.add_argument(
+        "--multisource_config_path",
+        default=_default_multisource_config_path(),
+        help="Path to write the VeOmni-style multisource YAML.",
     )
     parser.add_argument("--test_ratio", type=float, default=0.10, help="Target test row ratio.")
     parser.add_argument("--seed", type=int, default=42, help="Seed for video-name split.")
@@ -340,10 +405,17 @@ def main() -> None:
 
     if not 0 < args.test_ratio < 1:
         raise ValueError("--test_ratio must be between 0 and 1")
+    if any(weight < 0 for weight in args.source_weights):
+        raise ValueError("--source_weights must be non-negative")
+    if sum(args.source_weights) <= 0:
+        raise ValueError("--source_weights must contain at least one positive value")
+    if args.sources != SOURCE_ORDER:
+        raise ValueError("--source_weights and multisource YAML generation require --sources image text video")
 
     dpo_jsonl = os.path.expanduser(args.dpo_jsonl)
     video_dir = os.path.expanduser(args.video_dir)
     output_dir = os.path.abspath(os.path.expanduser(args.output_dir))
+    multisource_config_path = os.path.abspath(os.path.expanduser(args.multisource_config_path))
     image_dir = os.path.abspath(
         os.path.expanduser(args.image_dir) if args.image_dir else os.path.join(os.path.dirname(output_dir), "images")
     )
@@ -412,8 +484,7 @@ def main() -> None:
         if skipped[source]:
             print(f"    skipped_{source}={skipped[source]:,}", flush=True)
 
-    if set(args.sources) == {"image", "text", "video"}:
-        _write_multisource_config(output_dir)
+    _write_multisource_config(output_dir, multisource_config_path, args.source_weights)
 
     print("Done.", flush=True)
 
