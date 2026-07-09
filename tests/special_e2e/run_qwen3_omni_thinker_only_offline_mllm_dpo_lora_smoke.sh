@@ -2,7 +2,7 @@
 # Qwen3-Omni Thinker-only offline MLLM DPO + LoRA e2e smoke test.
 #
 # Builds a tiny random-weight Qwen3-Omni model, creates a small
-# LLaVA-Hound-DPO-style image/text/video parquet dataset, then runs a couple of
+# Omni-Preference-style image/video/audio parquet dataset, then runs a couple of
 # offline DPO training steps. This checks plumbing only, not model quality.
 #
 # Requires: verl, verl-omni, vllm-omni installed.
@@ -21,7 +21,7 @@ python3 -c "import transformers, accelerate; print('smoke deps: transformers', t
 NUM_GPUS=${NUM_GPUS:-2}
 MODEL_REPO=${MODEL_REPO:-ShowMaker27/Qwen3-Omni-tiny-random}
 MODEL_PATH=${MODEL_PATH:-}
-DATA_DIR=${DATA_DIR:-${HOME}/data/dummy_llava_hound_dpo}
+DATA_DIR=${DATA_DIR:-${HOME}/data/dummy_omni_preference_dpo}
 TOTAL_TRAIN_STEPS=${TOTAL_TRAIN_STEPS:-2}
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -39,14 +39,14 @@ if [ -z "${MODEL_PATH}" ]; then
     fi
 fi
 
-# ── Build dummy LLaVA-Hound-DPO-style multisource data if not present ──────────
-if [ ! -f "${DATA_DIR}/image/train.parquet" ] || [ ! -f "${DATA_DIR}/text/train.parquet" ] || [ ! -f "${DATA_DIR}/video/train.parquet" ]; then
-    python3 "${REPO_ROOT}/tests/special_e2e/create_dummy_llava_hound_dpo_data.py" \
+# ── Build dummy Omni-Preference-style multisource data if not present ──────────
+if [ ! -f "${DATA_DIR}/image/train.parquet" ] || [ ! -f "${DATA_DIR}/video/train.parquet" ] || [ ! -f "${DATA_DIR}/audio/train.parquet" ]; then
+    python3 "${REPO_ROOT}/tests/special_e2e/create_dummy_omni_preference_dpo_data.py" \
         --local_save_dir "${DATA_DIR}"
 fi
 
-TRAIN_FILE="[${DATA_DIR}/image/train.parquet,${DATA_DIR}/text/train.parquet,${DATA_DIR}/video/train.parquet]"
-VAL_FILE="[${DATA_DIR}/image/test.parquet,${DATA_DIR}/text/test.parquet,${DATA_DIR}/video/test.parquet]"
+TRAIN_FILE="[${DATA_DIR}/image/train.parquet,${DATA_DIR}/video/train.parquet,${DATA_DIR}/audio/train.parquet]"
+VAL_FILE="[${DATA_DIR}/image/test.parquet,${DATA_DIR}/video/test.parquet,${DATA_DIR}/audio/test.parquet]"
 
 # ── Run training (tiny: 2 steps, offline DPO, Thinker-only LoRA) ───────────────
 python3 -m verl_omni.trainer.main_omni \

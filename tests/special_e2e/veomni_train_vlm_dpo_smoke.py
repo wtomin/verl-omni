@@ -18,7 +18,7 @@ This mirrors VeOmni's ``tasks/train_vlm.py`` entrypoint, but swaps the VLM
 forward/backward step for a minimal DPO objective adapted from VeOmni's text DPO
 trainer. It is intentionally local to the smoke test so verl-omni can exercise
 Qwen3-Omni preference data through VeOmni's VLMTrainer stack without vendoring
-VeOmni.
+VeOmni. Expects Omni-Preference-format parquet (image/video/audio).
 """
 
 from __future__ import annotations
@@ -154,9 +154,9 @@ logger = logging.get_logger(__name__)
 
 _NON_MODEL_KEYS = set()
 _SOURCE_NAMES = (
-    "LLaVA-Hound-DPO-Image",
-    "LLaVA-Hound-DPO-Text",
-    "LLaVA-Hound-DPO-Video",
+    "Omni-Preference-Image",
+    "Omni-Preference-Video",
+    "Omni-Preference-Audio",
 )
 
 

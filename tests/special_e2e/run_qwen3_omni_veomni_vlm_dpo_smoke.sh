@@ -6,12 +6,12 @@
 #   bash train.sh tasks/train_vlm.py configs/multimodal/qwen3_omni/qwen3_omni.yaml
 #
 # but uses a local smoke task that calls VeOmni's VLMTrainer components and
-# applies a DPO loss to tiny LLaVA-Hound-DPO-style multimodal preference data.
+# applies a DPO loss to tiny Omni-Preference-style multimodal preference data.
 set -xeuo pipefail
 
 NUM_GPUS=${NUM_GPUS:-1}
 MODEL_PATH=${MODEL_PATH:-}
-DATA_DIR=${DATA_DIR:-${HOME}/data/dummy_llava_hound_dpo}
+DATA_DIR=${DATA_DIR:-${HOME}/data/dummy_omni_preference_dpo}
 TOTAL_TRAIN_STEPS=${TOTAL_TRAIN_STEPS:-2}
 RUN_DIR=${RUN_DIR:-${DATA_DIR}/veomni_vlm_dpo_smoke}
 VEOMNI_ROOT=${VEOMNI_ROOT:-}
@@ -40,23 +40,25 @@ if [ -z "${MODEL_PATH}" ]; then
 fi
 
 # ── Build dummy preference data ────────────────────────────────────────────────
-python3 "${REPO_ROOT}/tests/special_e2e/create_dummy_llava_hound_dpo_data.py" \
+python3 "${REPO_ROOT}/tests/special_e2e/create_dummy_omni_preference_dpo_data.py" \
     --local_save_dir "${DATA_DIR}"
 
 mkdir -p "${RUN_DIR}"
-DATA_CONFIG="${RUN_DIR}/llava_hound_dpo_multisource.yaml"
+DATA_CONFIG="${RUN_DIR}/omni_preference_dpo_multisource.yaml"
 TRAIN_CONFIG="${RUN_DIR}/qwen3_omni_veomni_vlm_dpo_smoke.yaml"
 
 cat >"${DATA_CONFIG}" <<EOF
 sources:
 - ${DATA_DIR}/image/train.parquet
-- ${DATA_DIR}/text/train.parquet
+- ${DATA_DIR}/video/train.parquet
+- ${DATA_DIR}/audio/train.parquet
 names:
-- LLaVA-Hound-DPO-Image
-- LLaVA-Hound-DPO-Text
+- Omni-Preference-Image
+- Omni-Preference-Video
+- Omni-Preference-Audio
 schedule:
 - schedule_type: const
-  weights: [0.5, 0.5]
+  weights: [0.34, 0.33, 0.33]
 EOF
 
 cat >"${TRAIN_CONFIG}" <<EOF
