@@ -224,8 +224,8 @@ python examples/dpo_trainer/data_process/omni_preference_dpo_multisource.py \
 
 ## 6. Offline DPO Parquet Schema
 
-Parquet rows follow the schema consumed by
-`verl_omni.utils.dataset.offline_mllm_dpo_dataset.offline_mllm_dpo_collate_fn`.
+Parquet rows follow the preference schema consumed by the Qwen3-Omni VeOmni
+VLM DPO smoke task.
 
 ### 6.1 Columns
 
@@ -243,26 +243,30 @@ Parquet rows follow the schema consumed by
 
 ---
 
-## 7. Training Configuration (verl-omni)
+## 7. Training Configuration (VeOmni)
 
-Point the offline MLLM DPO trainer at the generated parquet files:
+Point the VeOmni VLM DPO data config at the generated parquet files:
 
 ```yaml
-data.train_files:
+sources:
   - /path/to/Omni-Preference/parquet_dpo/image/train.parquet
   - /path/to/Omni-Preference/parquet_dpo/video/train.parquet
   - /path/to/Omni-Preference/parquet_dpo/audio/train.parquet
-data.val_files:
-  - /path/to/Omni-Preference/parquet_dpo/image/test.parquet
-  - /path/to/Omni-Preference/parquet_dpo/video/test.parquet
-  - /path/to/Omni-Preference/parquet_dpo/audio/test.parquet
-data.custom_cls.path: pkg://verl_omni.utils.dataset.offline_mllm_dpo_dataset
-data.custom_cls.collate_fn: offline_mllm_dpo_collate_fn
+names:
+  - Omni-Preference-Image
+  - Omni-Preference-Video
+  - Omni-Preference-Audio
+schedule:
+  - schedule_type: const
+    weights: [0.34, 0.33, 0.33]
 ```
 
-To train on a single modality, list only that modality's train/test parquet paths.
+To train on a single modality, list only that modality's parquet path and set
+the corresponding source name/weight.
 
-See [`run_qwen3_omni_thinker_only_offline_mllm_dpo_lora.sh`](run_qwen3_omni_thinker_only_offline_mllm_dpo_lora.sh) for an example launch script.
+See
+[`tests/special_e2e/run_qwen3_omni_veomni_vlm_dpo_smoke.sh`](../../../tests/special_e2e/run_qwen3_omni_veomni_vlm_dpo_smoke.sh)
+for an example launch script.
 
 ---
 
