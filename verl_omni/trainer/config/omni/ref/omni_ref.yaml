@@ -1,0 +1,23 @@
+# Defaults specify the default config from each component.
+defaults:
+
+  # Omni actor config reused for the reference worker.
+  - ../actor@_here_: omni_actor
+
+  # Load this config after defaults.
+  - _self_
+
+# Training strategy mirrors actor.
+strategy: ${actor_rollout_ref.actor.strategy}
+
+# Local per-GPU micro batch size mirrors actor.
+ppo_micro_batch_size_per_gpu: ${actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu}
+
+# The batch size for one forward pass in log-prob computation.
+log_prob_micro_batch_size_per_gpu: null
+
+# VeOmni config.
+veomni_config:
+
+  # Ref model is forward only.
+  forward_only: true

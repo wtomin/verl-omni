@@ -1,0 +1,176 @@
+# Defaults specify the default config from each component.
+defaults:
+
+  # Per-role profiler config
+  - ../../profiler@profiler: profiler
+
+  # Load this config after defaults.
+  - _self_
+
+# Rollout implementation name. Omni DPO currently uses offline actor-only training.
+name: vllm_omni
+
+# Rollout mode. Only async is supported when rollout is enabled.
+mode: async
+
+# Number of nodes for standalone rollout server.
+nnodes: 0
+
+# Number of GPUs per node for rollout server.
+n_gpus_per_node: ${oc.select:trainer.n_gpus_per_node,8}
+
+# Number of responses per prompt.
+n: 1
+
+# Prompt length used by data utilities.
+prompt_length: ${oc.select:data.max_prompt_length,512}
+
+# Model dtype for rollout-side engines.
+dtype: bfloat16
+
+# Fraction of GPU memory used by the rollout engine.
+gpu_memory_utilization: 0.5
+
+# Whether to disable CUDA graph.
+enforce_eager: false
+
+# Batch sizes to capture for CUDA graphs.
+cudagraph_capture_sizes: null
+
+# Whether to free engine cache after generation.
+free_cache_engine: true
+
+# Tensor parallel size for rollout.
+tensor_model_parallel_size: 1
+
+# Data parallel size for rollout.
+data_parallel_size: 1
+
+# Expert parallel size for rollout.
+expert_parallel_size: 1
+
+# Pipeline parallel size for rollout.
+pipeline_model_parallel_size: 1
+
+# Max number of tokens in a batch.
+max_num_batched_tokens: 8192
+
+# Max model length for rollout.
+max_model_len: null
+
+# Max number of sequences.
+max_num_seqs: 1024
+
+# Whether to enable chunked prefill.
+enable_chunked_prefill: true
+
+# Whether to enable prefix caching.
+enable_prefix_caching: true
+
+# Which loader to use for rollout model weights.
+load_format: dummy
+
+# Whether to use layered summon for rollout model weights.
+layered_summon: false
+
+# The batch size for one forward pass in log-prob computation.
+log_prob_micro_batch_size_per_gpu: null
+
+# Disable rollout logging statistics.
+disable_log_stats: true
+
+# Base seed for deterministic rollout RNG.
+seed: null
+
+# Multi-turn interaction config for tools or chat.
+multi_turn:
+
+  # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+  _target_: verl.workers.config.MultiTurnConfig
+
+  # Set to True for multi-turn tool interaction tasks.
+  enable: false
+
+# Extra inference engine arguments.
+engine_kwargs:
+
+  # vllm-omni engine config
+  vllm_omni: {}
+
+# Validation kwargs placeholder.
+val_kwargs:
+
+  # Number of validation responses.
+  n: 1
+
+  # Validation seed.
+  seed: 42
+
+# Whether rollout generation records log probabilities.
+calculate_log_probs: false
+
+# Named adapter used by rollout generation.
+rollout_adapter: default
+
+# Agent-loop rollout config.
+agent:
+
+  # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+  _target_: verl.workers.config.AgentLoopConfig
+
+  # Number of agent loop workers
+  num_workers: 8
+
+  # Default agent loop to use if agent_name is not set in the dataset.
+  default_agent_loop: single_turn_agent
+
+# Checkpoint Engine config for update weights from trainer to rollout.
+checkpoint_engine:
+
+  # Target class for checkpoint engine config
+  _target_: verl.workers.config.CheckpointEngineConfig
+
+  # Backend for checkpoint engine: naive, nccl, nixl, hccl
+  backend: naive
+
+  # Tensor bucket size in megabytes for batch weight updates.
+  update_weights_bucket_megabytes: 2048
+
+  # Additional keyword arguments to pass to the checkpoint engine constructor.
+  engine_kwargs: {}
+
+  # Optional module imported before custom checkpoint backend instantiation.
+  custom_backend_module: null
+
+# Whether to skip tokenizer initialization for rollout engine.
+skip_tokenizer_init: true
+
+# Whether to enable rollout routing replay for MoE models.
+enable_rollout_routing_replay: false
+
+# Prometheus configuration for vllm-omni server mode.
+prometheus:
+
+  # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+  _target_: verl.workers.config.PrometheusConfig
+
+  # Whether to enable prometheus metrics.
+  enable: false
+
+# Type of quantization in vllm-omni.
+quantization: null
+
+# MTP configuration, reuse model configuration.
+mtp: ${oc.select:actor_rollout_ref.model.mtp,null}
+
+# External libs for rollout-side extensions.
+external_lib: null
+
+# Prefill-Decode disaggregation config.
+disaggregation:
+
+  # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+  _target_: verl.workers.config.DisaggregationConfig
+
+  # Whether to enable PD disaggregation.
+  enabled: false

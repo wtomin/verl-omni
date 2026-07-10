@@ -34,7 +34,7 @@ python3 "${REPO_ROOT}/tests/special_e2e/create_dummy_omni_preference_dpo_data.py
     --val_size 1
 
 python3 -m verl_omni.trainer.main_diffusion \
-    diffusion/model_engine=veomni_diffusion \
+    --config-name=omni_trainer \
     algorithm.trainer_type=direct_preference \
     algorithm.sample_source=offline \
     algorithm.paired_preference=true \
@@ -46,19 +46,21 @@ python3 -m verl_omni.trainer.main_diffusion \
     data.custom_cls.name=OfflineMLLMDPODataset \
     data.custom_cls.collate_fn=offline_mllm_dpo_collate_fn \
     +data.mm_configs="{scale_factor:28,image_min_pixels:3136,image_max_pixels:12845056,video_min_pixels:3136,video_max_pixels:602112,max_ratio:200,min_frames:2,max_frames:4,frame_factor:1,sample_rate:16000,fps:2.0,use_audio_in_video:false}" \
-    actor_rollout_ref.model._target_=verl_omni.workers.config.omni.OmniModelConfig \
     actor_rollout_ref.model.path="${MODEL_PATH}" \
     actor_rollout_ref.model.model_type=omni_model \
-    +actor_rollout_ref.model.model_path="${MODEL_PATH}" \
+    actor_rollout_ref.model.model_path="${MODEL_PATH}" \
     actor_rollout_ref.model.config_path="${MODEL_PATH}" \
     actor_rollout_ref.model.tokenizer_path="${MODEL_PATH}" \
     actor_rollout_ref.model.trust_remote_code=true \
     actor_rollout_ref.model.external_lib=verl_omni.models.transformers.qwen3_omni_thinker \
     actor_rollout_ref.model.lora_rank=0 \
-    actor_rollout_ref.actor._target_=verl_omni.workers.config.omni.VeOmniOmniActorConfig \
-    actor_rollout_ref.actor.veomni_config._target_=verl_omni.workers.config.omni.VeOmniOmniEngineConfig \
-    actor_rollout_ref.actor.optim._target_=verl_omni.workers.config.omni.VeOmniOmniOptimizerConfig \
-    +actor_rollout_ref.actor.omni_loss="{loss_mode:dpo,beta:0.1,label_smoothing:0.0,loss_type:sigmoid,reference_free:false,average_log_prob:false,refer_model_precision:bfloat16}" \
+    actor_rollout_ref.actor.omni_loss.loss_mode=dpo \
+    actor_rollout_ref.actor.omni_loss.beta=0.1 \
+    actor_rollout_ref.actor.omni_loss.label_smoothing=0.0 \
+    actor_rollout_ref.actor.omni_loss.loss_type=sigmoid \
+    actor_rollout_ref.actor.omni_loss.reference_free=false \
+    actor_rollout_ref.actor.omni_loss.average_log_prob=false \
+    actor_rollout_ref.actor.omni_loss.refer_model_precision=bfloat16 \
     actor_rollout_ref.actor.optim.lr=1.0e-6 \
     actor_rollout_ref.actor.ppo_mini_batch_size=1 \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1 \

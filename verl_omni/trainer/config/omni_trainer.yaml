@@ -1,0 +1,251 @@
+# Format checks enforced on CI:
+# 1. Comments must appear above each field.
+# 2. There must be a blank line between each field.
+# 3. Inline comments (after a field on the same line) are not allowed.
+# 4. Indentation level is respected for nested fields.
+
+# Specify the default per-component configs.
+defaults:
+
+  # Omni actor config.
+  - omni/actor@actor_rollout_ref.actor: omni_actor
+
+  # Data config.
+  - data@data: legacy_data
+
+  # Omni reference config.
+  - omni/ref@actor_rollout_ref.ref: omni_ref
+
+  # Omni rollout config.
+  - omni/rollout@actor_rollout_ref.rollout: omni_rollout
+
+  # Omni model config.
+  - omni/model@actor_rollout_ref.model: omni_model
+
+  # Reward config.
+  - reward@reward: reward
+
+  # Load this config after defaults.
+  - _self_
+
+# Omni model engine name.
+model_engine: veomni_omni
+
+# Config for actor, rollout and reference model.
+actor_rollout_ref:
+
+  # Whether it is a hybrid engine.
+  hybrid_engine: true
+
+  # Timeout for operations executed against the process group.
+  nccl_timeout: 600
+
+  # Model config.
+  model:
+
+    # Select Omni trainer and OmniModelConfig.
+    model_type: omni_model
+
+# Config for the algorithm.
+algorithm:
+
+  # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+  _target_: verl_omni.trainer.config.DiffusionAlgoConfig
+
+  # Trainer loop. Omni currently supports direct preference training.
+  trainer_type: direct_preference
+
+  # Sample provenance. Omni currently supports offline training.
+  sample_source: offline
+
+  # True for pair-based algorithms such as offline DPO.
+  paired_preference: true
+
+  # Advantage estimator placeholder inherited by shared trainer utilities.
+  adv_estimator: dpo
+
+  # Whether to normalize advantages by std.
+  norm_adv_by_std_in_grpo: true
+
+  # Whether to normalize advantages using global standard deviation.
+  global_std: true
+
+  # Old-policy EMA schedule placeholder for shared trainer utilities.
+  old_policy_decay_schedule: copy
+
+  # Fixed old-policy EMA decay.
+  old_policy_decay: null
+
+  # Optimizer steps between old-policy adapter refreshes.
+  old_policy_update_interval: 1
+
+  # Fraction of rollout timesteps used for forward-process training.
+  timestep_fraction: 1.0
+
+  # Advantage mapping mode.
+  adv_mode: continuous
+
+# Config for the trainer.
+trainer:
+
+  # Number of epochs in training.
+  total_epochs: 30
+
+  # Total training steps.
+  total_training_steps: null
+
+  # Project name for experiment tracking.
+  project_name: verl_examples
+
+  # Experiment name for run identification.
+  experiment_name: qwen3_omni_dpo
+
+  # Logging backends to use.
+  logger: ["console", "wandb"]
+
+  # Number of generations to log during validation.
+  log_val_generations: 0
+
+  # Directory for logging rollout data.
+  rollout_data_dir: null
+
+  # Directory for logging validation data.
+  validation_data_dir: null
+
+  # Number of nodes used in training.
+  nnodes: 1
+
+  # Number of GPUs per node.
+  n_gpus_per_node: 8
+
+  # Save frequency by iteration.
+  save_freq: -1
+
+  # Extra time before ESI shutdown for checkpointing.
+  esi_redundant_time: 0
+
+  # Resume mode: "auto", "disable", or "resume_path".
+  resume_mode: auto
+
+  # Path to resume training from.
+  resume_from_path: null
+
+  # Whether to run validation before training begins.
+  val_before_train: true
+
+  # Whether to run validation only.
+  val_only: false
+
+  # Validation frequency in training iterations.
+  test_freq: -1
+
+  # Default path to distributed filesystem for saving checkpoints.
+  default_hdfs_dir: null
+
+  # Whether to delete local checkpoints after loading.
+  del_local_ckpt_after_load: false
+
+  # Default local directory for saving checkpoints.
+  default_local_dir: checkpoints/${trainer.project_name}/${trainer.experiment_name}
+
+  # Maximum number of actor checkpoints to keep.
+  max_actor_ckpt_to_keep: null
+
+  # Timeout for Ray worker registration.
+  ray_wait_register_center_timeout: 300
+
+  # Device to run training on.
+  device: cuda
+
+# Profiler configs.
+global_profiler:
+
+  # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+  _target_: verl.utils.profiler.ProfilerConfig
+
+  # Profiling tool.
+  tool: null
+
+  # Steps at which profiling should be performed.
+  steps: null
+
+  # Whether to combine continuous steps into one database.
+  profile_continuous_steps: false
+
+  # Path to save profiling contents.
+  save_path: "outputs/profile"
+
+  # Tool-specific global configurations.
+  global_tool_config:
+
+    # NVIDIA Nsight Systems config.
+    nsys:
+
+      # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+      _target_: verl.utils.profiler.config.NsightToolConfig
+
+      # True for each task has its own database.
+      discrete: false
+
+      # Controller-side Nsight Systems options.
+      controller_nsight_options:
+
+        # Select the API(s) to be traced.
+        trace: "cuda,nvtx,cublas,ucx"
+
+        # Track GPU memory usage by CUDA kernels.
+        cuda-memory-usage: "true"
+
+        # CUDA graphs will be traced as a whole.
+        cuda-graph-trace: "graph"
+
+      # Worker-side Nsight Systems options.
+      worker_nsight_options:
+
+        # Select the API(s) to be traced.
+        trace: "cuda,nvtx,cublas,ucx"
+
+        # Track GPU memory usage by CUDA kernels.
+        cuda-memory-usage: "true"
+
+        # CUDA graphs will be traced as a whole.
+        cuda-graph-trace: "graph"
+
+        # Profiling only in a range of torch.cuda.profiler.start and stop.
+        capture-range: "cudaProfilerApi"
+
+        # Specify desired behavior when a capture range ends.
+        capture-range-end: null
+
+        # Send signal to the target application's process group.
+        kill: none
+
+    # Torch CUDA memory snapshot dumping.
+    torch_memory:
+
+      # Maximum number of allocation entries to record.
+      trace_alloc_max_entries: 100_000
+
+      # Depth of the call stack to capture for each allocation.
+      stack_depth: 32
+
+      # Memory history context.
+      context: "all"
+
+      # Stack types to capture.
+      stacks: "all"
+
+      # Extra keyword arguments forwarded to torch.
+      kw_args: {}
+
+# Configs related to Ray.
+ray_kwargs:
+
+  # Configs related to Ray initialization.
+  ray_init:
+
+    # Number of CPUs for Ray.
+    num_cpus: null
+
+  # Path to save Ray timeline JSON for performance profiling.
+  timeline_json_file: null

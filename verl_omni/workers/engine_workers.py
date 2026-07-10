@@ -95,14 +95,6 @@ def _with_routing_replay_flag(enabled: bool):
     return decorator
 
 
-def _drop_omega_keys(config: DictConfig, keys: tuple[str, ...]) -> DictConfig:
-    config = deepcopy(config)
-    with open_dict(config):
-        for key in keys:
-            config.pop(key, None)
-    return config
-
-
 class TrainingWorker(Worker, DistProfilerExtension):
     """
     TrainingWorker provides a Tinker-like API (https://thinkingmachines.ai/tinker/) as a RayWorkerGroup
@@ -579,21 +571,9 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         raw_model_type = self.config.model.get("model_type", "language_model")
         raw_model_target = str(self.config.model.get("_target_", ""))
         is_omni_model = raw_model_type == "omni_model" or raw_model_target.endswith(".OmniModelConfig")
-        model_omega = self.config.model
-        if is_omni_model:
-            model_omega = _drop_omega_keys(
-                model_omega,
-                (
-                    "algorithm",
-                    "architecture",
-                    "transformer_config",
-                    "transformer_subfolder",
-                    "attn_backend",
-                    "pipeline",
-                    "algo",
-                ),
-            )
-        model_config: HFModelConfig | DiffusionModelConfig | OmniModelConfig = omega_conf_to_dataclass(model_omega)
+        model_config: HFModelConfig | DiffusionModelConfig | OmniModelConfig = omega_conf_to_dataclass(
+            self.config.model
+        )
         is_diffusion = model_config.get("model_type", "language_model") in (
             "diffusion_model",
             "diffusion_dpo_model",
@@ -609,16 +589,13 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 self.config.ref.ppo_micro_batch_size_per_gpu = self.config.ref.pop(
                     "log_prob_micro_batch_size_per_gpu", None
                 )
-                if not is_diffusion:
+                if not is_diffusion and not is_omni_model:
                     self.config.ref.ppo_micro_batch_size = self.config.ref.pop("log_prob_micro_batch_size", None)
                     self.config.ref.use_dynamic_bsz = self.config.ref.pop("log_prob_use_dynamic_bsz", False)
                     self.config.ref.ppo_max_token_len_per_gpu = self.config.ref.pop(
                         "log_prob_max_token_len_per_gpu", None
                     )
-            ref_omega = self.config.ref
-            if is_omni_model:
-                ref_omega = _drop_omega_keys(ref_omega, ("diffusion_loss", "rollout_correction"))
-            ref_config: ActorConfig | DiffusionActorConfig = omega_conf_to_dataclass(ref_omega)
+            ref_config: ActorConfig | DiffusionActorConfig = omega_conf_to_dataclass(self.config.ref)
 
             # The ref model does not need to enable MTP; force it to false.
             ref_config.model_config = deepcopy(model_config)
@@ -657,10 +634,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         # 2. build actor model
         if "actor" in self.role:
-            actor_omega = self.config.actor
-            if is_omni_model:
-                actor_omega = _drop_omega_keys(actor_omega, ("diffusion_loss", "rollout_correction"))
-            actor_config: ActorConfig = omega_conf_to_dataclass(actor_omega)
+            actor_config: ActorConfig = omega_conf_to_dataclass(self.config.actor)
             actor_config.model_config = model_config
             distillation_config: Optional[DistillationConfig] = (
                 omega_conf_to_dataclass(self.distillation_config) if self.distillation_enabled else None
