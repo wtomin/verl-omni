@@ -33,8 +33,7 @@ python3 "${REPO_ROOT}/tests/special_e2e/create_dummy_omni_preference_dpo_data.py
     --train_size 2 \
     --val_size 1
 
-torchrun --standalone --nnodes=1 --nproc_per_node="${NUM_GPUS}" \
-    -m verl_omni.trainer.main_diffusion \
+python3 -m verl_omni.trainer.main_diffusion \
     diffusion/model_engine=veomni_diffusion \
     algorithm.trainer_type=direct_preference \
     algorithm.sample_source=offline \

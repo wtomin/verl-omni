@@ -63,8 +63,9 @@ from verl_omni.utils.mfu import (
 from verl_omni.workers.config import (
     DiffusionActorConfig,
     DiffusionModelConfig,
+    OmniModelConfig,
 )
-from verl_omni.workers.utils.losses import diffusion_loss
+from verl_omni.workers.utils.losses import diffusion_loss, omni_loss
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -92,6 +93,14 @@ def _with_routing_replay_flag(enabled: bool):
         return wrapper
 
     return decorator
+
+
+def _drop_omega_keys(config: DictConfig, keys: tuple[str, ...]) -> DictConfig:
+    config = deepcopy(config)
+    with open_dict(config):
+        for key in keys:
+            config.pop(key, None)
+    return config
 
 
 class TrainingWorker(Worker, DistProfilerExtension):
@@ -567,12 +576,30 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def init_model(self):
-        model_config: HFModelConfig | DiffusionModelConfig = omega_conf_to_dataclass(self.config.model)
+        raw_model_type = self.config.model.get("model_type", "language_model")
+        raw_model_target = str(self.config.model.get("_target_", ""))
+        is_omni_model = raw_model_type == "omni_model" or raw_model_target.endswith(".OmniModelConfig")
+        model_omega = self.config.model
+        if is_omni_model:
+            model_omega = _drop_omega_keys(
+                model_omega,
+                (
+                    "algorithm",
+                    "architecture",
+                    "transformer_config",
+                    "transformer_subfolder",
+                    "attn_backend",
+                    "pipeline",
+                    "algo",
+                ),
+            )
+        model_config: HFModelConfig | DiffusionModelConfig | OmniModelConfig = omega_conf_to_dataclass(model_omega)
         is_diffusion = model_config.get("model_type", "language_model") in (
             "diffusion_model",
             "diffusion_dpo_model",
             "diffusion_nft_model",
         )
+        is_omni_model = model_config.get("model_type", "language_model") == "omni_model"
 
         # 1. build reference model
         if "ref" in self.role:
@@ -588,7 +615,10 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                     self.config.ref.ppo_max_token_len_per_gpu = self.config.ref.pop(
                         "log_prob_max_token_len_per_gpu", None
                     )
-            ref_config: ActorConfig | DiffusionActorConfig = omega_conf_to_dataclass(self.config.ref)
+            ref_omega = self.config.ref
+            if is_omni_model:
+                ref_omega = _drop_omega_keys(ref_omega, ("diffusion_loss", "rollout_correction"))
+            ref_config: ActorConfig | DiffusionActorConfig = omega_conf_to_dataclass(ref_omega)
 
             # The ref model does not need to enable MTP; force it to false.
             ref_config.model_config = deepcopy(model_config)
@@ -627,7 +657,10 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         # 2. build actor model
         if "actor" in self.role:
-            actor_config: ActorConfig = omega_conf_to_dataclass(self.config.actor)
+            actor_omega = self.config.actor
+            if is_omni_model:
+                actor_omega = _drop_omega_keys(actor_omega, ("diffusion_loss", "rollout_correction"))
+            actor_config: ActorConfig = omega_conf_to_dataclass(actor_omega)
             actor_config.model_config = model_config
             distillation_config: Optional[DistillationConfig] = (
                 omega_conf_to_dataclass(self.distillation_config) if self.distillation_enabled else None
@@ -692,6 +725,8 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 "diffusion_nft_model",
             ):
                 self.loss_fn = partial(diffusion_loss, config=actor_config)
+            elif is_omni_model:
+                self.loss_fn = partial(omni_loss, config=actor_config)
             else:
                 self.loss_fn = partial(ppo_loss, config=actor_config)
             self.actor = TrainingWorker(config=actor_training_config)

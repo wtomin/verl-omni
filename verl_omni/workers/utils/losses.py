@@ -19,7 +19,8 @@ from verl.utils import tensordict_utils as tu
 from verl.utils.metric import AggregationType, Metric
 
 from verl_omni.trainer.diffusion.diffusion_algos import get_diffusion_loss_fn
-from verl_omni.workers.config import DiffusionActorConfig
+from verl_omni.trainer.omni.omni_algos import get_omni_loss_fn
+from verl_omni.workers.config import DiffusionActorConfig, VeOmniOmniActorConfig
 
 
 def _apply_bypass_rc(
@@ -118,3 +119,14 @@ def diffusion_loss(config: DiffusionActorConfig, model_output, data: TensorDict,
         loss_value = loss_value * sp_size
 
     return loss_value, metrics
+
+
+def omni_loss(config: VeOmniOmniActorConfig, model_output=None, data: TensorDict | None = None, dp_group=None):
+    """Compute loss for omni models."""
+    del dp_group
+    if model_output is None or data is None:
+        raise ValueError("omni_loss requires model_output and data.")
+    loss_func = get_omni_loss_fn(config.omni_loss.loss_mode)
+    loss_result = loss_func(config=config, model_output=model_output, data=data)
+    gradient_accumulation_steps = tu.get_non_tensor_data(data, "gradient_accumulation_steps", default=1)
+    return loss_result.loss / gradient_accumulation_steps, loss_result.metrics
