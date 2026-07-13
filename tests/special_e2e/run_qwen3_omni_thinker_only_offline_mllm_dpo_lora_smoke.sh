@@ -6,6 +6,9 @@ NUM_GPUS=${NUM_GPUS:-1}
 MODEL_PATH=${MODEL_PATH:-}
 DATA_DIR=${DATA_DIR:-${HOME}/data/dummy_omni_preference_dpo}
 TOTAL_TRAIN_STEPS=${TOTAL_TRAIN_STEPS:-2}
+IMAGE_RATIO=${IMAGE_RATIO:-1.0}
+VIDEO_RATIO=${VIDEO_RATIO:-1.0}
+AUDIO_RATIO=${AUDIO_RATIO:-1.0}
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
@@ -46,6 +49,12 @@ python3 -m verl_omni.trainer.main_omni \
     data.custom_cls.path=pkg://verl_omni.utils.dataset.offline_mllm_dpo_dataset \
     data.custom_cls.name=OfflineMLLMDPODataset \
     data.custom_cls.collate_fn=offline_mllm_dpo_collate_fn \
+    data.sampler.class_name=ModalityBatchSampler \
+    data.sampler.batch_size=3 \
+    data.sampler.drop_last=true \
+    data.sampler.modality_ratios.image="${IMAGE_RATIO}" \
+    data.sampler.modality_ratios.video="${VIDEO_RATIO}" \
+    data.sampler.modality_ratios.audio="${AUDIO_RATIO}" \
     +data.mm_configs="{scale_factor:28,image_min_pixels:3136,image_max_pixels:12845056,video_min_pixels:3136,video_max_pixels:602112,max_ratio:200,min_frames:2,max_frames:4,frame_factor:1,sample_rate:16000,fps:2.0,use_audio_in_video:false}" \
     actor_rollout_ref.model.path="${MODEL_PATH}" \
     actor_rollout_ref.model.model_type=omni_model \

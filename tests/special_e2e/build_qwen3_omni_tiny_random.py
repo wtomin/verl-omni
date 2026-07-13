@@ -146,6 +146,11 @@ def _build_tiny_config(vocab_size: int):
     # The default config leaves rope_scaling unset, but the M-RoPE rotary
     # embedding requires it. mrope_section must sum to head_dim // 2 (= 16 here).
     text.rope_scaling = {"rope_type": "default", "mrope_section": [8, 4, 4]}
+    text.rope_parameters = {
+        "rope_type": "default",
+        "rope_theta": getattr(text, "rope_theta", 1_000_000.0),
+        "mrope_section": [8, 4, 4],
+    }
 
     vision = config.thinker_config.vision_config
     # Shrink dims but keep every field vLLM-Omni's vision tower reads (the default
@@ -214,8 +219,14 @@ def _build_tiny_processor(tokenizer):
             min_pixels=3136,
             max_pixels=12845056,
         ),
-        video_processor=Qwen2VLVideoProcessor(),
-        feature_extractor=WhisperFeatureExtractor(),
+        video_processor=Qwen2VLVideoProcessor(
+            patch_size=16,
+            merge_size=2,
+            temporal_patch_size=2,
+            min_pixels=3136,
+            max_pixels=602112,
+        ),
+        feature_extractor=WhisperFeatureExtractor(feature_size=128, num_mel_bins=128),
         tokenizer=tokenizer,
         chat_template=_CHATML_TEMPLATE,
     )
@@ -253,6 +264,8 @@ def _merge_image_processor_config(output_dir: str, processor) -> None:
     import json
 
     pc_path = os.path.join(output_dir, "preprocessor_config.json")
+    if not os.path.isfile(pc_path):
+        return
     with open(pc_path) as f:
         merged = json.load(f)
     image_dict = processor.image_processor.to_dict()

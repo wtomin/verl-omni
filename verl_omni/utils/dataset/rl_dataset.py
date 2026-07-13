@@ -14,10 +14,13 @@
 """RLHF Dataset for diffusion model training."""
 
 import logging
+import math
+import random
+from collections import defaultdict
 
 from omegaconf import DictConfig
 from verl.trainer.ppo.utils import create_rl_dataset as _upstream_create_rl_dataset
-from verl.trainer.ppo.utils import create_rl_sampler
+from verl.trainer.ppo.utils import create_rl_sampler as _upstream_create_rl_sampler
 from verl.utils.dataset.rl_dataset import RLHFDataset as _UpstreamRLHFDataset
 from verl.utils.dataset.rl_dataset import collate_fn as _upstream_collate_fn
 from verl.utils.dataset.rl_dataset import get_dataset_class as _upstream_get_dataset_class
@@ -31,8 +34,89 @@ __all__ = [
     "get_collate_fn",
     "get_dataset_class",
     "create_rl_dataset",
+    "create_rl_batch_sampler",
     "create_rl_sampler",
 ]
+
+
+class ModalityBatchSampler:
+    """Yield same-modality batches with configurable modality sampling weights."""
+
+    is_batch_sampler = True
+
+    def __init__(
+        self,
+        dataset,
+        batch_size: int,
+        modality_ratios: dict[str, float] | None = None,
+        *,
+        drop_last: bool = True,
+        shuffle: bool = True,
+        seed: int | None = None,
+    ):
+        if batch_size <= 0:
+            raise ValueError(f"batch_size must be positive, got {batch_size}")
+        self.dataset = dataset
+        self.batch_size = int(batch_size)
+        self.drop_last = bool(drop_last)
+        self.shuffle = bool(shuffle)
+        self.seed = seed
+
+        groups: dict[str, list[int]] = defaultdict(list)
+        for index in range(len(dataset)):
+            if hasattr(dataset, "get_modality"):
+                modality = dataset.get_modality(index)
+            else:
+                modality = getattr(dataset, "modalities", ["unknown"] * len(dataset))[index]
+            groups[str(modality)].append(index)
+        self.groups = {modality: indices for modality, indices in groups.items() if indices}
+        if not self.groups:
+            raise ValueError("ModalityBatchSampler requires at least one non-empty modality group.")
+
+        ratios = modality_ratios or {}
+        self.modalities = sorted(self.groups)
+        self.weights = [float(ratios.get(modality, 1.0)) for modality in self.modalities]
+        if any(weight <= 0 for weight in self.weights):
+            raise ValueError(
+                "modality_ratios must be positive for present modalities, "
+                f"got {dict(zip(self.modalities, self.weights, strict=True))}"
+            )
+
+        dataset_size = len(dataset)
+        self.num_batches = (
+            dataset_size // self.batch_size if self.drop_last else math.ceil(dataset_size / self.batch_size)
+        )
+
+    def __len__(self) -> int:
+        return self.num_batches
+
+    def __iter__(self):
+        rng = random.Random(self.seed)
+        groups = {modality: list(indices) for modality, indices in self.groups.items()}
+        cursors = {modality: 0 for modality in groups}
+        if self.shuffle:
+            for indices in groups.values():
+                rng.shuffle(indices)
+
+        for _ in range(self.num_batches):
+            modality = rng.choices(self.modalities, weights=self.weights, k=1)[0]
+            indices = groups[modality]
+            batch = []
+            while len(batch) < self.batch_size:
+                cursor = cursors[modality]
+                remaining = len(indices) - cursor
+                take = min(self.batch_size - len(batch), remaining)
+                batch.extend(indices[cursor : cursor + take])
+                cursors[modality] += take
+                if len(batch) == self.batch_size:
+                    break
+                cursors[modality] = 0
+                if self.shuffle:
+                    rng.shuffle(indices)
+                if not self.drop_last and len(indices) < self.batch_size and len(batch) == len(indices):
+                    break
+            if len(batch) == self.batch_size or (batch and not self.drop_last):
+                yield batch
 
 
 class RLHFDataset(_UpstreamRLHFDataset):
@@ -120,3 +204,36 @@ def create_rl_dataset(data_paths, data_config, tokenizer, processor, is_train=Tr
         config=data_config,
         max_samples=max_samples,
     )
+
+
+def _is_modality_batch_sampler(data_config: DictConfig) -> bool:
+    sampler_config = data_config.get("sampler", {})
+    return sampler_config is not None and sampler_config.get("class_name", None) == "ModalityBatchSampler"
+
+
+def create_rl_batch_sampler(
+    data_config: DictConfig, dataset, *, batch_size: int | None = None, drop_last: bool | None = None
+):
+    sampler_config = data_config.get("sampler", {})
+    if not _is_modality_batch_sampler(data_config):
+        return None
+    if batch_size is None:
+        batch_size = sampler_config.get("batch_size", None) or data_config.train_batch_size
+        batch_size = int(batch_size)
+    if drop_last is None:
+        drop_last = bool(sampler_config.get("drop_last", True))
+    return ModalityBatchSampler(
+        dataset,
+        batch_size=batch_size,
+        modality_ratios=dict(sampler_config.get("modality_ratios", {}) or {}),
+        drop_last=drop_last,
+        shuffle=bool(data_config.get("shuffle", True)),
+        seed=data_config.get("seed"),
+    )
+
+
+def create_rl_sampler(data_config, dataset):
+    batch_sampler = create_rl_batch_sampler(data_config, dataset)
+    if batch_sampler is not None:
+        return batch_sampler
+    return _upstream_create_rl_sampler(data_config, dataset)

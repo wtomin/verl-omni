@@ -23,11 +23,11 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pandas as pd
 import torch
 from omegaconf import DictConfig, OmegaConf
 from torch.utils.data import Dataset
-from verl.utils.dataset.rl_dataset import collate_fn as _upstream_collate_fn
 
 _SOURCE_NAMES = (
     "Omni-Preference-Image",
@@ -149,6 +149,35 @@ def _merge_chosen_rejected(chosen: dict[str, Any], rejected: dict[str, Any]) -> 
     return merged
 
 
+def _pad_tensor_to_shape(tensor: torch.Tensor, shape: Sequence[int], pad_value: float | int | bool = 0) -> torch.Tensor:
+    if tuple(tensor.shape) == tuple(shape):
+        return tensor
+    output = torch.full(tuple(shape), pad_value, dtype=tensor.dtype, device=tensor.device)
+    slices = tuple(slice(0, size) for size in tensor.shape)
+    output[slices] = tensor
+    return output
+
+
+def _collate_tensor_values(key: str, values: Sequence[torch.Tensor | None]) -> torch.Tensor:
+    present = [value for value in values if value is not None]
+    if not present:
+        raise ValueError(f"Cannot collate tensor key {key!r} without any tensor values.")
+
+    max_shape = tuple(max(value.shape[dim] for value in present) for dim in range(present[0].ndim))
+    pad_value: float | int | bool = 0
+    if key == "labels":
+        pad_value = -100
+    elif key == "attention_mask":
+        pad_value = 0
+
+    padded = []
+    for value in values:
+        if value is None:
+            value = torch.zeros(max_shape, dtype=present[0].dtype, device=present[0].device)
+        padded.append(_pad_tensor_to_shape(value, max_shape, pad_value))
+    return torch.stack(padded, dim=0)
+
+
 def _register_pass_through_preprocessors(source_names: Sequence[str]) -> None:
     from veomni.data.multimodal import PREPROCESSOR_REGISTRY
 
@@ -168,10 +197,13 @@ def _prepare_qwen3_omni_processor(processor):
             return getattr(processor, name)
 
         def __call__(self, *args, **kwargs):
-            if kwargs.get("audios"):
-                kwargs["audio"] = kwargs.pop("audios")
+            audios = kwargs.pop("audios", None)
+            if audios:
+                audios = [audio for audio in audios if audio is not None]
+                if audios:
+                    kwargs["audio"] = audios
             else:
-                kwargs.pop("audios", None)
+                kwargs.pop("audio", None)
             kwargs = {key: value for key, value in kwargs.items() if value != []}
             return processor(*args, **kwargs)
 
@@ -206,6 +238,24 @@ def _normalise_source_name(value: Any, default: str) -> str:
     if "audio" in lowered:
         return "Omni-Preference-Audio"
     return text
+
+
+def _normalise_modality(value: Any, default: str = "unknown") -> str:
+    text = str(value or default).lower()
+    if "image" in text:
+        return "image"
+    if "video" in text:
+        return "video"
+    if "audio" in text:
+        return "audio"
+    return default
+
+
+def _row_modality(row: dict[str, Any], source_name_key: str, default: str = "unknown") -> str:
+    extra_info = _as_python(row.get("extra_info", {}))
+    if isinstance(extra_info, dict) and extra_info.get("modality"):
+        return _normalise_modality(extra_info["modality"], default)
+    return _normalise_modality(row.get(source_name_key) or row.get("source_name"), default)
 
 
 class OfflineMLLMDPODataset(Dataset):
@@ -248,6 +298,13 @@ class OfflineMLLMDPODataset(Dataset):
         missing = required - set(self.dataframe.columns)
         if missing:
             raise ValueError(f"Offline MLLM DPO data is missing required columns: {sorted(missing)}")
+        self.modalities = [
+            _row_modality(row, self.source_name_key, self.data_source)
+            for row in self.dataframe.to_dict(orient="records")
+        ]
+
+    def get_modality(self, item: int) -> str:
+        return self.modalities[item]
 
     def __len__(self) -> int:
         return len(self.dataframe)
@@ -274,9 +331,30 @@ class OfflineMLLMDPODataset(Dataset):
         )
         transformed["data_source"] = row.get(self.source_name_key) or self.data_source
         transformed["reward_model"] = row.get("reward_model", {"style": "model", "ground_truth": row[self.chosen_key]})
-        transformed["extra_info"] = row.get("extra_info", {"index": int(item)})
+        modality = self.get_modality(item)
+        transformed["modality"] = modality
+        extra_info = _as_python(row.get("extra_info", {"index": int(item)}))
+        if isinstance(extra_info, dict):
+            extra_info = {**extra_info, "modality": modality}
+        transformed["extra_info"] = extra_info
         return transformed
 
 
 def offline_mllm_dpo_collate_fn(features):
-    return _upstream_collate_fn(features)
+    modalities = {feature.get("modality") for feature in features}
+    if len(modalities) != 1:
+        raise ValueError(f"Offline MLLM DPO batches must contain a single modality, got {sorted(modalities)}")
+
+    tensor_keys = {key for feature in features for key, value in feature.items() if isinstance(value, torch.Tensor)}
+    non_tensor_keys = {
+        key for feature in features for key, value in feature.items() if not isinstance(value, torch.Tensor)
+    }
+
+    batch: dict[str, Any] = {}
+    for key in sorted(tensor_keys):
+        batch[key] = _collate_tensor_values(key, [feature.get(key) for feature in features])
+        if key == "position_ids" and batch[key].ndim == 4 and batch[key].shape[2] == 1:
+            batch[key] = batch[key].squeeze(2).contiguous()
+    for key in sorted(non_tensor_keys):
+        batch[key] = np.fromiter((feature.get(key) for feature in features), dtype=object, count=len(features))
+    return batch

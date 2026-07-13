@@ -31,6 +31,8 @@ __all__ = ["OmniModelConfig"]
 class OmniModelConfig(BaseConfig):
     _mutable_fields = {
         "model_type",
+        "algorithm",
+        "architecture",
         "tokenizer_path",
         "tokenizer",
         "processor",
@@ -39,6 +41,8 @@ class OmniModelConfig(BaseConfig):
     }
 
     path: str = MISSING
+    architecture: str = MISSING
+    algorithm: str = MISSING
     model_type: str = "omni_model"
     config_path: Optional[str] = None
     model_path: Optional[str] = None
@@ -52,7 +56,7 @@ class OmniModelConfig(BaseConfig):
     use_shm: bool = False
     trust_remote_code: bool = True
     custom_chat_template: Optional[str] = None
-    external_lib: Optional[str] = None
+    external_lib: Optional[str | list[str]] = None
 
     enable_gradient_checkpointing: bool = True
     encoder_data_balance: bool = False

@@ -28,6 +28,7 @@ from __future__ import annotations
 import argparse
 import os
 import struct
+import subprocess
 import wave
 
 import pandas as pd
@@ -44,7 +45,7 @@ MODALITY_SPECS = {
     "video": {
         "data_source": "omni_preference/video",
         "ability": "video_qa",
-        "source_media": "academic_source/dummy_clip",
+        "source_media": "academic_source/dummy_clip.mp4",
     },
     "audio": {
         "data_source": "omni_preference/audio",
@@ -64,7 +65,31 @@ def _write_png(path: str, color: tuple[int, int, int]) -> str:
     return os.path.abspath(path)
 
 
-def _write_wav(path: str, *, sample_rate: int = 16_000, duration_s: float = 0.25) -> str:
+def _write_video(path: str, frame_paths: list[str], *, fps: int = 2) -> str:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    frame_pattern = os.path.join(os.path.dirname(frame_paths[0]), "frame_%03d.png")
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-loglevel",
+            "error",
+            "-framerate",
+            str(fps),
+            "-i",
+            frame_pattern,
+            "-pix_fmt",
+            "yuv420p",
+            "-movflags",
+            "+faststart",
+            path,
+        ],
+        check=True,
+    )
+    return os.path.abspath(path)
+
+
+def _write_wav(path: str, *, sample_rate: int = 16_000, duration_s: float = 1.0) -> str:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     num_frames = int(sample_rate * duration_s)
     frames = bytearray()
@@ -80,17 +105,18 @@ def _write_wav(path: str, *, sample_rate: int = 16_000, duration_s: float = 0.25
     return os.path.abspath(path)
 
 
-def _make_assets(root: str) -> dict[str, str | list[str]]:
+def _make_assets(root: str) -> dict[str, str]:
     media_dir = os.path.join(root, "media")
     image_path = _write_png(os.path.join(media_dir, "images", "dummy_image.png"), (240, 64, 64))
     audio_path = _write_wav(os.path.join(media_dir, "audio", "dummy_audio.wav"))
 
-    video_frame_dir = os.path.join(media_dir, "videos", "dummy_clip")
+    video_frame_dir = os.path.join(media_dir, "videos", "dummy_clip_frames")
     frame_paths = [
         _write_png(os.path.join(video_frame_dir, f"frame_{idx:03d}.png"), color)
         for idx, color in enumerate([(64, 128, 240), (64, 200, 120), (220, 180, 64)])
     ]
-    return {"image": image_path, "video": frame_paths, "audio": audio_path}
+    video_path = _write_video(os.path.join(media_dir, "videos", "dummy_clip.mp4"), frame_paths)
+    return {"image": image_path, "video": video_path, "audio": audio_path}
 
 
 def _base_row(split: str, modality: str, index: int, question: str) -> dict:
@@ -134,7 +160,7 @@ def _image_row(split: str, index: int, image_path: str) -> dict:
     return row
 
 
-def _video_row(split: str, index: int, frame_paths: list[str]) -> dict:
+def _video_row(split: str, index: int, video_path: str) -> dict:
     question = "What changes across the dummy video frames?"
     row = _base_row(split, "video", index, question)
     row["prompt"] = [
@@ -142,14 +168,12 @@ def _video_row(split: str, index: int, frame_paths: list[str]) -> dict:
         {
             "role": "user",
             "content": [
-                _content_item("video", video=os.path.dirname(frame_paths[0])),
+                _content_item("video", video=video_path),
                 _content_item("text", text=question),
             ],
         },
     ]
-    row["extra_info"]["video_path"] = os.path.dirname(frame_paths[0])
-    row["extra_info"]["video_frame_dir"] = os.path.dirname(frame_paths[0])
-    row["extra_info"]["video_frame_count"] = len(frame_paths)
+    row["extra_info"]["video_path"] = video_path
     return row
 
 
@@ -170,14 +194,14 @@ def _audio_row(split: str, index: int, audio_path: str) -> dict:
     return row
 
 
-def _build_rows(split: str, size: int, assets: dict[str, str | list[str]]) -> dict[str, list[dict]]:
+def _build_rows(split: str, size: int, assets: dict[str, str]) -> dict[str, list[dict]]:
     rows = {"image": [], "video": [], "audio": []}
     image_path = str(assets["image"])
-    frame_paths = list(assets["video"])
+    video_path = str(assets["video"])
     audio_path = str(assets["audio"])
     for idx in range(size):
         rows["image"].append(_image_row(split, idx, image_path))
-        rows["video"].append(_video_row(split, idx, frame_paths))
+        rows["video"].append(_video_row(split, idx, video_path))
         rows["audio"].append(_audio_row(split, idx, audio_path))
     return rows
 

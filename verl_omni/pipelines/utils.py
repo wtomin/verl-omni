@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Optional
+from typing import Any, Optional
 
 import torch
 from diffusers import ModelMixin, SchedulerMixin
@@ -20,9 +20,10 @@ from diffusers.training_utils import compute_density_for_timestep_sampling
 from tensordict import TensorDict
 from verl.utils.device import get_device_name
 
-from verl_omni.workers.config import DiffusionModelConfig
+from verl_omni.workers.config import DiffusionModelConfig, OmniModelConfig
 
 from .model_base import DiffusionModelBase
+from .omni_training_adapter import OmniTrainingAdapterBase
 
 
 def prepare_model_inputs(
@@ -67,6 +68,15 @@ def prepare_model_inputs(
         micro_batch,
         step,
     )
+
+
+def prepare_omni_model_inputs(
+    model_config: OmniModelConfig,
+    model_inputs: dict[str, Any],
+    dtype: torch.dtype,
+) -> dict[str, Any]:
+    """Build architecture-specific omni model inputs for the forward pass."""
+    return OmniTrainingAdapterBase.get_class(model_config).prepare_model_inputs(model_inputs, dtype=dtype)
 
 
 def build_scheduler(model_config: DiffusionModelConfig) -> SchedulerMixin:

@@ -349,6 +349,12 @@ data:
   sampler:
     class_path: null
     class_name: null
+    modality_ratios:
+      image: 1.0
+      video: 1.0
+      audio: 1.0
+    batch_size: null
+    drop_last: true
   datagen:
     path: null
     name: null

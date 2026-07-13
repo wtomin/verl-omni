@@ -34,6 +34,7 @@ from verl.utils.torch_dtypes import PrecisionType
 from verl.workers.engine.base import BaseEngine, BaseEngineCtx, EngineRegistry
 from verl.workers.engine.utils import enable_full_determinism, prepare_micro_batches
 
+from verl_omni.pipelines.utils import prepare_omni_model_inputs
 from verl_omni.workers.config import (
     OmniModelConfig,
     VeOmniOmniEngineConfig,
@@ -280,14 +281,23 @@ class VeOmniOmniEngine(BaseEngine):
         )
 
     def _concatenated_forward(self, model, micro_batch: TensorDict | dict[str, Any]):
+        from veomni.data.data_collator import add_flash_attention_kwargs_from_position_ids
         from veomni.distributed.parallel_state import get_parallel_state
         from veomni.distributed.sequence_parallel import gather_outputs
         from veomni.utils.constants import IGNORE_INDEX
+        from veomni.utils.seqlen_pos_transform_utils import valid_seqlens_from_cu_seqlens
 
         model_inputs = {key: value for key, value in micro_batch.items() if key not in _NON_MODEL_KEYS}
+        model_inputs = prepare_omni_model_inputs(
+            self.model_config,
+            model_inputs,
+            dtype=next(model.parameters()).dtype,
+        )
+        if "cu_seq_lens_q" not in model_inputs:
+            add_flash_attention_kwargs_from_position_ids(model_inputs)
         outputs = model(**model_inputs, return_log_probs=True, use_cache=False)
         log_probs_packed = outputs.fused_linear_aux.log_probs.squeeze(0)
-        seq_lens = self.post_forward.compute_seqlens_func(micro_batch)
+        seq_lens = valid_seqlens_from_cu_seqlens(model_inputs["cu_seq_lens_q"]).tolist()
         if self.use_ulysses_sp:
             log_probs_packed = gather_outputs(log_probs_packed, gather_dim=0, group=get_parallel_state().sp_group)
         log_probs_packed = log_probs_packed[: sum(seq_lens)]

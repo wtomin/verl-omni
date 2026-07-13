@@ -119,6 +119,16 @@ sampler:
   # the name of the curriculum class like `MySampler`
   class_name: null
 
+  # Optional modality-aware batch sampler for offline MLLM DPO. Set
+  # class_name=ModalityBatchSampler to make every dataloader batch contain one
+  # modality only.
+  modality_ratios:
+    image: 1.0
+    video: 1.0
+    audio: 1.0
+  batch_size: null
+  drop_last: True
+
 # Data generation configuration for augmenting the dataset.
 datagen:
 

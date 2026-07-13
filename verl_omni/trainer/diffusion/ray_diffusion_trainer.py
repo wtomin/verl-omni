@@ -201,7 +201,12 @@ class BaseRayDiffusionTrainer(ABC):
         Creates the train and validation dataloaders.
         """
         # TODO: we have to make sure the batch size is divisible by the dp size
-        from verl_omni.utils.dataset.rl_dataset import create_rl_dataset, create_rl_sampler, get_collate_fn
+        from verl_omni.utils.dataset.rl_dataset import (
+            create_rl_batch_sampler,
+            create_rl_dataset,
+            create_rl_sampler,
+            get_collate_fn,
+        )
 
         if train_dataset is None:
             train_dataset = create_rl_dataset(
@@ -228,27 +233,52 @@ class BaseRayDiffusionTrainer(ABC):
 
         num_workers = self.config.data["dataloader_num_workers"]
 
-        self.train_dataloader = StatefulDataLoader(
-            dataset=self.train_dataset,
-            batch_size=self.config.data.get("gen_batch_size", self.config.data.train_batch_size),
-            num_workers=num_workers,
-            drop_last=True,
-            collate_fn=collate_fn,
-            sampler=train_sampler,
-        )
+        if getattr(train_sampler, "is_batch_sampler", False):
+            self.train_dataloader = StatefulDataLoader(
+                dataset=self.train_dataset,
+                batch_sampler=train_sampler,
+                num_workers=num_workers,
+                collate_fn=collate_fn,
+            )
+        else:
+            self.train_dataloader = StatefulDataLoader(
+                dataset=self.train_dataset,
+                batch_size=self.config.data.get("gen_batch_size", self.config.data.train_batch_size),
+                num_workers=num_workers,
+                drop_last=True,
+                collate_fn=collate_fn,
+                sampler=train_sampler,
+            )
 
         val_batch_size = self.config.data.val_batch_size  # Prefer config value if set
         if val_batch_size is None:
             val_batch_size = len(self.val_dataset)
 
-        self.val_dataloader = StatefulDataLoader(
-            dataset=self.val_dataset,
-            batch_size=val_batch_size,
-            num_workers=num_workers,
-            shuffle=self.config.data.get("validation_shuffle", True),
-            drop_last=False,
-            collate_fn=collate_fn,
-        )
+        val_batch_sampler = None
+        if getattr(train_sampler, "is_batch_sampler", False):
+            val_batch_sampler = create_rl_batch_sampler(
+                self.config.data,
+                self.val_dataset,
+                batch_size=val_batch_size or self.config.data.train_batch_size,
+                drop_last=False,
+            )
+
+        if val_batch_sampler is not None:
+            self.val_dataloader = StatefulDataLoader(
+                dataset=self.val_dataset,
+                batch_sampler=val_batch_sampler,
+                num_workers=num_workers,
+                collate_fn=collate_fn,
+            )
+        else:
+            self.val_dataloader = StatefulDataLoader(
+                dataset=self.val_dataset,
+                batch_size=val_batch_size,
+                num_workers=num_workers,
+                shuffle=self.config.data.get("validation_shuffle", True),
+                drop_last=False,
+                collate_fn=collate_fn,
+            )
 
         assert len(self.train_dataloader) >= 1, "Train dataloader is empty!"
         assert len(self.val_dataloader) >= 1, "Validation dataloader is empty!"

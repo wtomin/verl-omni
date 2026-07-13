@@ -10,6 +10,12 @@ _target_: verl_omni.workers.config.omni.OmniModelConfig
 # Path to the HuggingFace model.
 path: ~/models/Qwen/Qwen3-Omni-30B-A3B-Thinking
 
+# Model architecture key used to select the omni training adapter.
+architecture: Qwen3OmniMoeForConditionalGeneration
+
+# Training algorithm key used to select the omni training adapter.
+algorithm: dpo
+
 # Model type used to select the Omni trainer and worker path.
 model_type: omni_model
 
@@ -41,7 +47,9 @@ trust_remote_code: true
 custom_chat_template: null
 
 # External library to import before loading the model.
-external_lib: null
+external_lib:
+  - verl_omni.models.transformers.qwen3_omni_thinker
+  - verl_omni.pipelines.qwen3_omni_dpo
 
 # Whether to enable gradient checkpointing.
 enable_gradient_checkpointing: true

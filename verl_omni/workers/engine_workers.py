@@ -344,9 +344,15 @@ class TrainingWorker(Worker, DistProfilerExtension):
             total_num_iterations = data.shape[0] // mini_batch_size_per_gpu * epochs
 
             for batch_idx, mini_batch_td in enumerate(dataloader):
-                # add global token num
                 if "input_ids" in mini_batch_td:
-                    global_token_num = mini_batch_td["input_ids"].offsets().diff().tolist()  # (total_nnz,)
+                    input_ids = mini_batch_td["input_ids"]
+                    # Support both ragged tensors and padded dense tensors when estimating sequence lengths for MFU.
+                    if hasattr(input_ids, "offsets"):
+                        global_token_num = input_ids.offsets().diff().tolist()  # (total_nnz,)
+                    elif "attention_mask" in mini_batch_td:
+                        global_token_num = mini_batch_td["attention_mask"].sum(dim=-1).tolist()
+                    else:
+                        global_token_num = (input_ids != 0).sum(dim=-1).tolist()
                     # allgather from dp rank
                     global_token_num_output = [None] * torch.distributed.get_world_size(
                         self.engine.get_data_parallel_group()
@@ -374,11 +380,12 @@ class TrainingWorker(Worker, DistProfilerExtension):
                     for key, val in output.items():
                         # flattn dp and micro batch
                         if isinstance(val, list):
-                            output[key] = (
-                                Metric.aggregate_dp(val)
-                                if isinstance(val[0], Metric)
-                                else list(chain.from_iterable(val))
-                            )
+                            if val and isinstance(val[0], Metric):
+                                output[key] = Metric.aggregate_dp(val)
+                            elif val and all(isinstance(item, list) for item in val):
+                                output[key] = list(chain.from_iterable(val))
+                            else:
+                                output[key] = val
                     append_to_dict(metrics, output)
 
                 output = tu.get_tensordict(tensor_dict={}, non_tensor_dict={"metrics": metrics}).cpu()
