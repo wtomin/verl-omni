@@ -138,12 +138,18 @@ def patch_hf_processor_for_qwen3_omni() -> None:
             return None
 
     _vt.hf_processor = _patched_hf_processor
-    # Also refresh verl.utils's stale re-export (callers use `from verl.utils import hf_processor`).
+    # Also refresh stale re-exports/imports that captured the original helper.
     import sys as _sys
 
-    for _mod_name in ("verl.utils", "verl.workers.config.model"):
+    for _mod_name in list(_sys.modules.keys()):
+        if not _mod_name.startswith("verl"):
+            continue
         _mod = _sys.modules.get(_mod_name)
-        if _mod is not None and hasattr(_mod, "hf_processor"):
+        if (
+            _mod is not None
+            and hasattr(_mod, "hf_processor")
+            and _mod.__dict__.get("hf_processor") is _original_hf_processor
+        ):
             _mod.hf_processor = _patched_hf_processor
 
 
