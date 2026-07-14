@@ -40,9 +40,10 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
-# Declare permissions just read content.
+# Declare permissions just read content and PR file metadata.
 permissions:
   contents: read
+  pull-requests: read
 
 env:
   IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:vllm023.dev1"
@@ -55,7 +56,7 @@ env:
 jobs:
   setup_runner:
     # Pull request label mapping:
-    #   ready-for-ci               -> all GPU smoke groups in parallel on one 8-GPU runner
+    #   ready-for-ci               -> diff-selected GPU smoke groups in parallel, up to 8 GPUs
     #   ci-core                    -> key module coverage on one 2-GPU runner
     #   ci-e2e-omni                -> omni trainer e2e coverage on one 2-GPU runner
     #   ci-e2e-diffusion           -> diffusion trainer e2e coverage on one 4-GPU runner
@@ -64,6 +65,10 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       mode: ${{ steps.resolve-mode.outputs.mode }}
+      groups-json: ${{ steps.resolve-groups.outputs.groups-json }}
+      group-count: ${{ steps.resolve-groups.outputs.group-count }}
+      total-gpus: ${{ steps.resolve-groups.outputs.total-gpus }}
+      runner-size: ${{ steps.resolve-groups.outputs.runner-size }}
       runner-label: ${{ steps.create-runner.outputs.runner-label }}
       mlp-task-id: ${{ steps.create-runner.outputs.mlp-task-id }}
     steps:
@@ -82,6 +87,38 @@ jobs:
             mode="ci-e2e-diffusion"
           fi
           echo "mode=${mode}" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        if: steps.resolve-mode.outputs.mode != 'none'
+      - id: resolve-groups
+        if: steps.resolve-mode.outputs.mode != 'none'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mode="${{ steps.resolve-mode.outputs.mode }}"
+
+          if [[ "${mode}" == "all" && "${{ github.event_name }}" == "pull_request" ]]; then
+            gh api \
+              "repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/files" \
+              --paginate \
+              --jq '.[].filename' > changed_files.txt
+            plan_json="$(python tests/gpu_smoke/select_gpu_smoke_groups.py --changed-files-file changed_files.txt)"
+          elif [[ "${mode}" == "all" ]]; then
+            plan_json="$(python tests/gpu_smoke/select_gpu_smoke_groups.py --all)"
+          else
+            plan_json="$(python tests/gpu_smoke/select_gpu_smoke_groups.py --groups "${mode}")"
+          fi
+
+          echo "Resolved GPU smoke plan: ${plan_json}"
+          echo "groups-json=${plan_json}" >> "$GITHUB_OUTPUT"
+          PLAN_JSON="${plan_json}" python - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          import os
+
+          plan = json.loads(os.environ["PLAN_JSON"])
+          print(f"group-count={plan['group_count']}")
+          print(f"total-gpus={plan['total_gpus']}")
+          print(f"runner-size={plan['runner_size']}")
+          PY
       - id: create-runner
         if: steps.resolve-mode.outputs.mode != 'none'
         uses: volcengine/vemlp-github-runner@v1
@@ -93,72 +130,71 @@ jobs:
   gpu_smoke:
     needs: setup_runner
     if: needs.setup_runner.outputs.mode != 'none'
-    runs-on: ["${{ needs.setup_runner.outputs.runner-label || (needs.setup_runner.outputs.mode == 'ci-e2e-diffusion' && 'L20x4' || needs.setup_runner.outputs.mode == 'all' && 'L20x8' || 'L20x2') }}"]
-    timeout-minutes: ${{ needs.setup_runner.outputs.mode == 'all' && 90 || 45 }}
+    runs-on: ["${{ needs.setup_runner.outputs.runner-label || needs.setup_runner.outputs.runner-size || 'L20x8' }}"]
+    timeout-minutes: ${{ needs.setup_runner.outputs.group-count == '1' && 45 || 90 }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           fetch-depth: 0
       - uses: ./.github/actions/gpu-smoke-prepare
       - name: Run selected GPU smoke tests
+        env:
+          GPU_SMOKE_GROUPS_JSON: ${{ needs.setup_runner.outputs.groups-json }}
         run: |
           mode="${{ needs.setup_runner.outputs.mode }}"
           ray stop --force || true
-          case "${mode}" in
-            all)
-              set -euo pipefail
-              mkdir -p logs/gpu_smoke/parallel
+          set -euo pipefail
+          mkdir -p logs/gpu_smoke/parallel
 
-              pids=()
-              names=()
+          python - <<'PY' > /tmp/gpu_smoke_groups.tsv
+          import json
+          import os
 
-              run_group() {
-                local name="$1"
-                local devices="$2"
-                local num_gpus="$3"
-                local script="$4"
-                local logfile="logs/gpu_smoke/parallel/${name}.log"
+          plan = json.loads(os.environ["GPU_SMOKE_GROUPS_JSON"])
+          for group in plan["groups"]:
+              print(f"{group['name']}\t{group['devices']}\t{group['num_gpus']}\t{group['script']}")
+          PY
 
-                echo "Starting ${name} on CUDA_VISIBLE_DEVICES=${devices}; log=${logfile}"
-                GPU_SMOKE_SKIP_RAY_STOP=1 bash "${script}" \
-                  --num-gpus "${num_gpus}" \
-                  --cuda-visible-devices "${devices}" \
-                  > "${logfile}" 2>&1 &
-                pids+=("$!")
-                names+=("${name}")
-              }
+          if [[ ! -s /tmp/gpu_smoke_groups.tsv ]]; then
+            echo "No GPU smoke groups selected for mode: ${mode}"
+            exit 1
+          fi
 
-              run_group ci-core "0,1" 2 tests/gpu_smoke/run_gpu_smoke_core.sh
-              run_group ci-e2e-omni "2,3" 2 tests/gpu_smoke/run_gpu_smoke_omni_e2e.sh
-              run_group ci-e2e-diffusion "4,5,6,7" 4 tests/gpu_smoke/run_gpu_smoke_diffusion_e2e.sh
+          pids=()
+          names=()
 
-              failed=0
-              for i in "${!pids[@]}"; do
-                if wait "${pids[$i]}"; then
-                  echo "[PASS] ${names[$i]}"
-                else
-                  echo "[FAIL] ${names[$i]}"
-                  failed=1
-                fi
-              done
+          run_group() {
+            local name="$1"
+            local devices="$2"
+            local num_gpus="$3"
+            local script="$4"
+            local logfile="logs/gpu_smoke/parallel/${name}.log"
 
-              ray stop --force || true
-              exit "${failed}"
-              ;;
-            ci-core)
-              bash tests/gpu_smoke/run_gpu_smoke_core.sh --num-gpus 2
-              ;;
-            ci-e2e-omni)
-              bash tests/gpu_smoke/run_gpu_smoke_omni_e2e.sh --num-gpus 2
-              ;;
-            ci-e2e-diffusion)
-              bash tests/gpu_smoke/run_gpu_smoke_diffusion_e2e.sh --num-gpus 4
-              ;;
-            *)
-              echo "Unsupported smoke mode: ${mode}"
-              exit 1
-              ;;
-          esac
+            echo "Starting ${name} on CUDA_VISIBLE_DEVICES=${devices}; log=${logfile}"
+            GPU_SMOKE_SKIP_RAY_STOP=1 bash "${script}" \
+              --num-gpus "${num_gpus}" \
+              --cuda-visible-devices "${devices}" \
+              > "${logfile}" 2>&1 &
+            pids+=("$!")
+            names+=("${name}")
+          }
+
+          while IFS=$'\t' read -r name devices num_gpus script; do
+            run_group "${name}" "${devices}" "${num_gpus}" "${script}"
+          done < /tmp/gpu_smoke_groups.tsv
+
+          failed=0
+          for i in "${!pids[@]}"; do
+            if wait "${pids[$i]}"; then
+              echo "[PASS] ${names[$i]}"
+            else
+              echo "[FAIL] ${names[$i]}"
+              failed=1
+            fi
+          done
+
+          ray stop --force || true
+          exit "${failed}"
       - if: always()
         uses: ./.github/actions/gpu-smoke-upload-logs
 

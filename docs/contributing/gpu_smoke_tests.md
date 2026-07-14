@@ -184,13 +184,42 @@ Apply one label to the pull request to trigger the matching GPU smoke job:
 
 | Label | Runner | What runs |
 |---|---|---|
-| `ready-for-ci` | 8 GPUs (L20x8) | All three groups in parallel (same layout as above) |
+| `ready-for-ci` | Up to 8 GPUs (L20x2/L20x4/L20x8) | Automatically selected groups based on the PR diff |
 | `ci-core` | 2 GPUs (L20x2) | `run_gpu_smoke_core.sh` only |
 | `ci-e2e-omni` | 2 GPUs (L20x2) | `run_gpu_smoke_omni_e2e.sh` only |
 | `ci-e2e-diffusion` | 4 GPUs (L20x4) | `run_gpu_smoke_diffusion_e2e.sh` only |
 
 Pick the **smallest label that covers your change** during development. Use
-`ready-for-ci` before merge when you want the full parallel suite.
+`ready-for-ci` before merge when you want CI to choose all required GPU smoke
+groups for the PR.
+
+### Automatic `ready-for-ci` selection
+
+For pull requests, `ready-for-ci` reads the changed file list and selects the
+smallest known group set that covers those paths. The selector also assigns
+non-overlapping `CUDA_VISIBLE_DEVICES` ranges so all selected groups fit within
+8 GPUs:
+
+| Selected groups | Device assignment |
+|---|---|
+| `ci-core` | `0,1` |
+| `ci-e2e-omni` | `0,1` |
+| `ci-e2e-diffusion` | `0,1,2,3` |
+| `ci-core` + `ci-e2e-omni` | `0,1` and `2,3` |
+| all groups | `0,1`, `2,3`, and `4,5,6,7` |
+
+The mapping is intentionally conservative:
+
+| Changed paths | Selected group |
+|---|---|
+| `verl_omni/workers/**`, `verl_omni/agent_loop/**`, `verl_omni/reward_loop/**`, matching GPU tests | `ci-core` |
+| `verl_omni/trainer/omni/**`, `verl_omni/trainer/config/omni/**`, `qwen3_omni_thinker.py`, omni e2e scripts | `ci-e2e-omni` |
+| `verl_omni/trainer/diffusion/**`, `verl_omni/trainer/config/diffusion/**`, `verl_omni/pipelines/**`, `verl_omni/models/diffusers/**`, diffusion e2e scripts | `ci-e2e-diffusion` |
+| shared CI/test helpers, package metadata, shared trainer config, or unknown GPU-smoke paths | all groups |
+
+Pushes to `main` and `v0.*` still run all groups. If future group definitions
+would require more than 8 GPUs in one `ready-for-ci` run, CI fails closed instead
+of oversubscribing devices.
 
 ### Other CI workflows on PRs
 
