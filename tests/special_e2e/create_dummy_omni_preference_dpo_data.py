@@ -28,9 +28,9 @@ from __future__ import annotations
 import argparse
 import os
 import struct
-import subprocess
 import wave
 
+import av
 import pandas as pd
 from PIL import Image
 
@@ -65,27 +65,29 @@ def _write_png(path: str, color: tuple[int, int, int]) -> str:
     return os.path.abspath(path)
 
 
-def _write_video(path: str, frame_paths: list[str], *, fps: int = 2) -> str:
+def _write_video(
+    path: str,
+    colors: list[tuple[int, int, int]],
+    *,
+    fps: int = 2,
+    size: tuple[int, int] = (64, 64),
+) -> str:
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    frame_pattern = os.path.join(os.path.dirname(frame_paths[0]), "frame_%03d.png")
-    subprocess.run(
-        [
-            "ffmpeg",
-            "-y",
-            "-loglevel",
-            "error",
-            "-framerate",
-            str(fps),
-            "-i",
-            frame_pattern,
-            "-pix_fmt",
-            "yuv420p",
-            "-movflags",
-            "+faststart",
-            path,
-        ],
-        check=True,
-    )
+    width, height = size
+    container = av.open(path, mode="w")
+    stream = container.add_stream("libx264", rate=fps)
+    stream.width = width
+    stream.height = height
+    stream.pix_fmt = "yuv420p"
+
+    for color in colors:
+        frame = av.VideoFrame.from_image(Image.new("RGB", size, color=color))
+        for packet in stream.encode(frame):
+            container.mux(packet)
+
+    for packet in stream.encode():
+        container.mux(packet)
+    container.close()
     return os.path.abspath(path)
 
 
@@ -110,12 +112,10 @@ def _make_assets(root: str) -> dict[str, str]:
     image_path = _write_png(os.path.join(media_dir, "images", "dummy_image.png"), (240, 64, 64))
     audio_path = _write_wav(os.path.join(media_dir, "audio", "dummy_audio.wav"))
 
-    video_frame_dir = os.path.join(media_dir, "videos", "dummy_clip_frames")
-    frame_paths = [
-        _write_png(os.path.join(video_frame_dir, f"frame_{idx:03d}.png"), color)
-        for idx, color in enumerate([(64, 128, 240), (64, 200, 120), (220, 180, 64)])
-    ]
-    video_path = _write_video(os.path.join(media_dir, "videos", "dummy_clip.mp4"), frame_paths)
+    video_path = _write_video(
+        os.path.join(media_dir, "videos", "dummy_clip.mp4"),
+        [(64, 128, 240), (64, 200, 120), (220, 180, 64)],
+    )
     return {"image": image_path, "video": video_path, "audio": audio_path}
 
 
