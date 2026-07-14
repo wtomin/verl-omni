@@ -2,9 +2,33 @@
 
 Last updated: 07/14/2026.
 
-This guide explains how to choose the right CI layer and how to add tests that run in the expected workflow.
+This guide explains the test hierarchy for `verl_omni`, starting with L1 CPU tests and leaving room for higher layers such as L2 GPU smoke tests.
 
-## Test Taxonomy
+## Table of Contents
+
+- [Test Hierarchy](#test-hierarchy)
+- [Choosing a Layer](#choosing-a-layer)
+- [L1 CPU Tests](#l1-cpu-tests)
+  - [Scope](#scope)
+  - [File Naming](#file-naming)
+  - [Placement](#placement)
+  - [Coverage](#coverage)
+  - [Local Commands](#local-commands)
+  - [Adding a New L1 Test](#adding-a-new-l1-test)
+- [Future Layers](#future-layers)
+
+## Test Hierarchy
+
+The project uses a layered testing model. Lower layers should be cheaper, faster, and more deterministic. Choose the lowest layer that can catch the regression.
+
+| Layer | Purpose | Typical Environment |
+| --- | --- | --- |
+| L1 | CPU-only unit and lightweight integration tests | GitHub-hosted CPU runner |
+| L2 | GPU smoke tests for tiny end-to-end paths | GPU runner with tiny-random models |
+| L3 | Backend or numerical comparison tests | GPU runner with fixed seeds |
+| L4 | Real model and dataset validation | Scheduled or manually triggered jobs |
+
+## Choosing a Layer
 
 | Question | Layer |
 | --- | --- |
@@ -13,14 +37,12 @@ This guide explains how to choose the right CI layer and how to add tests that r
 | Does it compare numerical metrics or performance across backends for short fixed-seed runs? | L3 |
 | Does it use real model weights and real datasets to validate convergence curves? | L4 |
 
+
 ## L1 CPU Tests
 
-L1 tests must end with `_on_cpu.py`. The CPU workflow writes a temporary `pytest.ini` that sets:
+L1 is the current primary CI test layer. Use it for lightweight CPU coverage that can run quickly and deterministically on every pull request.
 
-```ini
-[pytest]
-python_files = *_on_cpu.py
-```
+### Scope
 
 Use L1 for lightweight coverage of:
 
@@ -30,9 +52,18 @@ Use L1 for lightweight coverage of:
 - Loss functions, advantage computation, registries, and metric utilities.
 - Pipeline or adapter boundary behavior that can be tested with mocks.
 
-Do not use L1 for GPU kernels, Ray clusters, rollout engines, real checkpoints, or full trainer smoke scripts. Put those in L2.
+Do not use L1 for GPU kernels, Ray clusters, rollout engines, real checkpoints, or full trainer smoke scripts. Put those in L2 or above.
 
-## Placement Rules
+### File Naming
+
+L1 tests must end with `_on_cpu.py`. The CPU workflow writes a temporary `pytest.ini` that sets:
+
+```ini
+[pytest]
+python_files = *_on_cpu.py
+```
+
+### Placement
 
 Place tests under the top-level module they cover. For example:
 
@@ -44,7 +75,7 @@ Place tests under the top-level module they cover. For example:
 
 Special workflow folders such as `tests/special_e2e/` and `tests/special_sanity/` are reserved for non-L1 checks.
 
-## Coverage
+### Coverage
 
 L1 reports line and branch coverage for `verl_omni`. The workflow produces:
 
@@ -56,7 +87,7 @@ Coverage should help identify untested API surfaces, but avoid adding brittle te
 
 Diff coverage thresholds should be introduced only after the baseline and exception policy are agreed by maintainers. Until then, contributors should use the report to inspect their changed modules.
 
-## Local Commands
+### Local Commands
 
 To run only L1-style tests locally:
 
@@ -73,11 +104,23 @@ pytest -s -x --asyncio-mode=auto tests/path/to/test_file_on_cpu.py
 
 Delete the temporary `pytest.ini` if it is not part of your intended change.
 
-## Adding a New Test
+### Adding a New L1 Test
 
-1. Choose the lowest CI layer that can catch the regression.
+1. Confirm the behavior can run fully on CPU.
 2. Place the file under the matching `tests/<module>/` directory.
-3. Use `_on_cpu.py` for L1 tests.
+3. Name the file `test_<behavior>_on_cpu.py`.
 4. Keep fixtures small and deterministic.
-5. Mock model loading and external services unless the test explicitly belongs in L2 or above.
-6. Update workflow path filters if the new file lives outside existing trigger patterns.
+5. Mock model loading and external services.
+6. Run the L1 command above before opening a PR.
+
+## Future Layers
+
+This guide currently defines L1 in detail because L1 is the main pull-request test layer. Add dedicated sections for L2, L3, or L4 when those workflows have stable ownership, trigger rules, naming conventions, and local commands.
+
+When adding a new layer section, include:
+
+1. Scope and examples.
+2. Required environment.
+3. File naming or folder conventions.
+4. CI workflow trigger rules.
+5. Local or manual run commands.
