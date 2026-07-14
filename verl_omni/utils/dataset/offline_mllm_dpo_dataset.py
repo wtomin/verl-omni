@@ -29,11 +29,7 @@ import torch
 from omegaconf import DictConfig, OmegaConf
 from torch.utils.data import Dataset
 
-_SOURCE_NAMES = (
-    "Omni-Preference-Image",
-    "Omni-Preference-Video",
-    "Omni-Preference-Audio",
-)
+from verl_omni.utils.dataset.qwen3_omni_transform import process_qwen3_omni_sample
 
 
 def _read_dataframe(data_files: str | Sequence[str]) -> pd.DataFrame:
@@ -178,19 +174,6 @@ def _collate_tensor_values(key: str, values: Sequence[torch.Tensor | None]) -> t
     return torch.stack(padded, dim=0)
 
 
-def _register_pass_through_preprocessors(source_names: Sequence[str]) -> None:
-    from veomni.data.multimodal import PREPROCESSOR_REGISTRY
-
-    def _pass_through(conversations, **kwargs):
-        return conversations
-
-    for source_name in source_names:
-        try:
-            PREPROCESSOR_REGISTRY[source_name]
-        except (KeyError, ValueError):
-            PREPROCESSOR_REGISTRY.register(source_name)(_pass_through)
-
-
 def _prepare_qwen3_omni_processor(processor):
     class ProcessorProxy:
         def __getattr__(self, name):
@@ -259,7 +242,7 @@ def _row_modality(row: dict[str, Any], source_name_key: str, default: str = "unk
 
 
 class OfflineMLLMDPODataset(Dataset):
-    """Dataset for Omni-Preference rows consumed by VeOmni Qwen3-Omni DPO."""
+    """Dataset for Omni-Preference rows consumed by Qwen3-Omni offline DPO."""
 
     def __init__(self, data_files, tokenizer, processor=None, config: DictConfig | None = None, max_samples: int = -1):
         del tokenizer
@@ -267,8 +250,6 @@ class OfflineMLLMDPODataset(Dataset):
             raise ValueError("OfflineMLLMDPODataset requires a data config.")
         if processor is None:
             raise ValueError("OfflineMLLMDPODataset requires a multimodal processor.")
-
-        from veomni.data.data_transform import DATA_TRANSFORM_REGISTRY
 
         self.dataframe = _read_dataframe(data_files)
         if max_samples is not None and max_samples > 0:
@@ -283,16 +264,18 @@ class OfflineMLLMDPODataset(Dataset):
         self.source_name_key = config.get("source_name_key", "data_source")
         self.data_source = config.get("data_source", "offline_mllm_dpo")
 
-        source_names = tuple(config.get("source_names", _SOURCE_NAMES))
-        _register_pass_through_preprocessors(source_names)
-
         mm_configs = config.get("mm_configs", {})
         if isinstance(mm_configs, DictConfig):
             mm_configs = OmegaConf.to_container(mm_configs, resolve=True)
         self.transform_kwargs = dict(mm_configs or {})
         if "position_id_func" not in self.transform_kwargs and hasattr(self.processor, "get_rope_index"):
             self.transform_kwargs["position_id_func"] = self.processor.get_rope_index
-        self.base_transform = DATA_TRANSFORM_REGISTRY[config.get("base_transform", "qwen3_omni_moe")]
+        base_transform = config.get("base_transform", "qwen3_omni_moe")
+        if base_transform not in {"qwen3_omni_moe", "qwen2_5_omni"}:
+            raise ValueError(
+                f"Unsupported base_transform {base_transform!r}. Expected one of: 'qwen3_omni_moe', 'qwen2_5_omni'."
+            )
+        self.base_transform = process_qwen3_omni_sample
 
         required = {self.prompt_key, self.chosen_key, self.rejected_key}
         missing = required - set(self.dataframe.columns)
