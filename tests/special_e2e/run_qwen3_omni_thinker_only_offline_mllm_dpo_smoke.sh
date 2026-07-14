@@ -74,7 +74,7 @@ python3 -m verl_omni.trainer.main_omni \
     actor_rollout_ref.actor.ppo_mini_batch_size=1 \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1 \
     actor_rollout_ref.actor.veomni_config.model_dtype=bfloat16 \
-    actor_rollout_ref.actor.veomni_config.init_device=cuda \
+    actor_rollout_ref.actor.veomni_config.init_device=meta \
     actor_rollout_ref.actor.veomni_config.param_offload=false \
     actor_rollout_ref.actor.veomni_config.optimizer_offload=false \
     actor_rollout_ref.actor.use_kl_loss=false \
