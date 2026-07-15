@@ -246,6 +246,17 @@ def build(output_dir: str, *, seed: int = 42, dtype: torch.dtype = torch.bfloat1
     text.eos_token_id = tokenizer.eos_token_id
     text.pad_token_id = tokenizer.pad_token_id
 
+    # The default Qwen3OmniMoeConfig hardcodes multimodal placeholder ids from the
+    # real (151k-vocab) Qwen3-Omni tokenizer. Our tiny tokenizer assigns its own ids
+    # to <|image_pad|>/<|video_pad|>/<|audio_pad|>, so we realign the config here —
+    # otherwise `get_placeholder_mask` compares `input_ids` against ids that never
+    # occur, raising "Image features and image tokens do not match, tokens: 0, features: N".
+    vocab = tokenizer.get_vocab()
+    thinker_config = config.thinker_config
+    thinker_config.image_token_id = vocab["<|image_pad|>"]
+    thinker_config.video_token_id = vocab["<|video_pad|>"]
+    thinker_config.audio_token_id = vocab["<|audio_pad|>"]
+
     model = AutoModelForCausalLM.from_config(config).to(dtype)
 
     os.makedirs(output_dir, exist_ok=True)
