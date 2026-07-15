@@ -54,6 +54,8 @@ _NON_MODEL_KEYS = {
     "micro_batch_size_per_gpu",
     "mini_batch_size",
     "num_mini_batch",
+    "reference_chosen_logps",
+    "reference_rejected_logps",
     "sample_level_rewards",
     "sample_level_scores",
     "sp_size",
@@ -217,14 +219,6 @@ class VeOmniOmniEngine(BaseEngine):
             )
             self.lr_scheduler = torch.optim.lr_scheduler.LambdaLR(self.optimizer, lr_lambda=lambda _: 1.0)
 
-        self.reference_model = self._parallelize_model(
-            self._build_model(),
-            mixed_precision=self._build_mixed_precision_config(enable=False),
-            enable_gradient_checkpointing=False,
-        )
-        self.reference_model.requires_grad_(False)
-        self.reference_model.eval()
-
         from veomni.data.data_collator import PostCollator
 
         self.post_forward = PostCollator()
@@ -280,6 +274,11 @@ class VeOmniOmniEngine(BaseEngine):
             device_type=device_name, dtype=getattr(torch, self.engine_config.mixed_precision_param_dtype)
         )
 
+    def _load_model_to_gpu(self, model):
+        from veomni.distributed.offloading import load_model_to_gpu
+
+        load_model_to_gpu(model, get_device_id())
+
     def _concatenated_forward(self, model, micro_batch: TensorDict | dict[str, Any]):
         from veomni.data.data_collator import add_flash_attention_kwargs_from_position_ids
         from veomni.distributed.parallel_state import get_parallel_state
@@ -334,17 +333,15 @@ class VeOmniOmniEngine(BaseEngine):
             micro_batch,
             average_log_prob=tu.get_non_tensor_data(micro_batch, "average_log_prob", default=False),
         )
-        with torch.no_grad():
-            ref_chosen_logps, ref_rejected_logps = self._concatenated_forward(self.reference_model, micro_batch)
-
+        self._load_model_to_gpu(self.module)
         with self.model_fwd_context, self._mixed_precision_forward_context(), set_batch_invariant_mode(False):
             policy_chosen_logps, policy_rejected_logps = self._concatenated_forward(self.module, micro_batch)
 
         model_output = {
             "policy_chosen_logps": policy_chosen_logps,
             "policy_rejected_logps": policy_rejected_logps,
-            "reference_chosen_logps": ref_chosen_logps,
-            "reference_rejected_logps": ref_rejected_logps,
+            "reference_chosen_logps": micro_batch["reference_chosen_logps"],
+            "reference_rejected_logps": micro_batch["reference_rejected_logps"],
         }
         loss, metrics = loss_function(model_output=model_output, data=micro_batch)
         with self.model_bwd_context, set_batch_invariant_mode(False):
@@ -440,14 +437,12 @@ class VeOmniOmniEngine(BaseEngine):
         if device == device_name:
             if model:
                 load_model_to_gpu(self.module, get_device_id())
-                load_model_to_gpu(self.reference_model, get_device_id())
             if optimizer and self.optimizer is not None:
                 load_optimizer(self.optimizer, get_device_id())
             gc.collect()
         elif device == "cpu":
             if model:
                 offload_model_to_cpu(self.module)
-                offload_model_to_cpu(self.reference_model)
             if optimizer and self.optimizer is not None:
                 offload_optimizer(self.optimizer)
 
@@ -533,7 +528,6 @@ class EngineEvalModeCtx(BaseEngineCtx):
         assert isinstance(self.engine, VeOmniOmniEngine)
         super().__enter__()
         self.engine.module.eval()
-        self.engine.reference_model.eval()
 
     def __exit__(self, exc_type, exc_value, traceback):
         assert isinstance(self.engine, VeOmniOmniEngine)
@@ -550,7 +544,6 @@ class EngineTrainModeCtx(BaseEngineCtx):
         assert isinstance(self.engine, VeOmniOmniEngine)
         super().__enter__()
         self.engine.module.train()
-        self.engine.reference_model.eval()
 
     def __exit__(self, exc_type, exc_value, traceback):
         assert isinstance(self.engine, VeOmniOmniEngine)

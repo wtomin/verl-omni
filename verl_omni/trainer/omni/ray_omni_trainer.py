@@ -15,7 +15,9 @@
 """Omni direct-preference trainers built on the diffusion Ray trainer scaffold."""
 
 import logging
+from typing import Optional
 
+import ray
 from verl.protocol import DataProto
 from verl.trainer.ppo.utils import need_reference_policy
 from verl.utils import tensordict_utils as tu
@@ -33,8 +35,8 @@ sys_logger = logging.getLogger(__name__)
 class OmniDirectPreferenceRayTrainer(DirectPreferenceRayTrainer):
     """Offline Qwen3-Omni DPO trainer using the existing Ray direct-preference loop.
 
-    The VeOmni omni engine owns reference log-prob computation, so this subclass
-    only avoids diffusion-specific loss/ref-noise setup and actor-batch metadata.
+    Reference log-probs are computed by an external ref worker and passed to the
+    actor engine through the training batch.
     """
 
     def __init__(self, config, *args, **kwargs):
@@ -44,18 +46,63 @@ class OmniDirectPreferenceRayTrainer(DirectPreferenceRayTrainer):
             raise NotImplementedError("OmniDirectPreferenceRayTrainer currently supports offline DPO only.")
         if config.actor_rollout_ref.model.get("model_type", "language_model") != "omni_model":
             raise ValueError("OmniDirectPreferenceRayTrainer requires actor_rollout_ref.model.model_type=omni_model.")
-        if config.actor_rollout_ref.actor.omni_loss.loss_mode != "dpo":
+        loss_mode = config.actor_rollout_ref.actor.omni_loss.loss_mode
+        if loss_mode != "dpo":
             raise NotImplementedError("OmniDirectPreferenceRayTrainer currently supports omni_loss.loss_mode=dpo only.")
-        # The engine builds and forwards the frozen reference model internally.
-        self.use_reference_policy = need_reference_policy(self.config)
-        if self.use_reference_policy:
-            raise NotImplementedError("Omni DPO uses an engine-local reference model; disable external ref policy.")
+        self.use_reference_policy = need_reference_policy(self.config) or (loss_mode == "dpo")
         self._has_old_adapter = "old" in tuple(
             config.actor_rollout_ref.model.get("policy_state_adapters", ("default",))
         )
         if self._has_old_adapter:
             raise NotImplementedError("Omni DPO does not support old-policy adapters yet.")
         self._loss_fn = None
+
+    def init_workers(self):
+        if self.use_reference_policy and not self.ref_in_actor:
+            self._register_external_ref_policy_worker()
+        super().init_workers()
+
+    def _register_external_ref_policy_worker(self) -> None:
+        from verl.trainer.ppo.ray_trainer import Role
+
+        from verl_omni.workers.engine_workers import ActorRolloutRefWorker
+
+        if Role.RefPolicy not in self.role_worker_mapping:
+            self.role_worker_mapping[Role.RefPolicy] = ray.remote(ActorRolloutRefWorker)
+
+        # The shared offline task runner only maps Role.Actor. Omni DPO uses the
+        # same global pool for its external reference worker.
+        for mapping_attr in ("mapping", "resource_pool_mapping"):
+            mapping = getattr(self.resource_pool_manager, mapping_attr, None)
+            if isinstance(mapping, dict) and Role.RefPolicy not in mapping:
+                mapping[Role.RefPolicy] = mapping.get(Role.Actor, "global_pool")
+
+    def _compute_ref_log_prob(self, batch: DataProto) -> Optional[DataProto]:
+        batch_td = batch.to_tensordict()
+        batch_td = embeds_padding_2_no_padding(batch_td)
+        tu.assign_non_tensor(
+            batch_td,
+            compute_loss=False,
+            average_log_prob=self.config.actor_rollout_ref.actor.omni_loss.average_log_prob,
+        )
+        if self.ref_in_actor:
+            output = self.actor_rollout_wg.infer_actor_batch(batch_td)
+        else:
+            output = self.ref_policy_wg.infer_ref_batch(batch_td)
+        if output is None:
+            return None
+
+        ref_logps = tu.get_tensordict(
+            {
+                "reference_chosen_logps": tu.get(output, "chosen_logps").float(),
+                "reference_rejected_logps": tu.get(output, "rejected_logps").float(),
+            }
+        )
+        return DataProto.from_tensordict(ref_logps)
+
+    def _compute_ref_noise_pred(self, batch: DataProto) -> Optional[DataProto]:
+        """Hook used by the shared direct-preference loop for reference inference."""
+        return self._compute_ref_log_prob(batch)
 
     def _update_actor(self, batch: DataProto) -> DataProto:
         rollout_config = self.config.actor_rollout_ref.rollout

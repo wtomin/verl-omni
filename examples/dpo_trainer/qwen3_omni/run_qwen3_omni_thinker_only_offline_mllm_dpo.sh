@@ -8,10 +8,13 @@ MODEL_PATH=${MODEL_PATH:-${HOME}/models/Qwen/Qwen3-Omni-30B-A3B-Thinking}
 DATA_DIR=${DATA_DIR:-${HOME}/data/omni_preference_dpo}
 TRAIN_FILES=${TRAIN_FILES:-"['${DATA_DIR}/image/train.parquet','${DATA_DIR}/video/train.parquet','${DATA_DIR}/audio/train.parquet']"}
 VAL_FILES=${VAL_FILES:-"['${DATA_DIR}/image/test.parquet','${DATA_DIR}/video/test.parquet','${DATA_DIR}/audio/test.parquet']"}
-NUM_GPUS_ACTOR=${NUM_GPUS_ACTOR:-4}
+NUM_GPUS_ACTOR=${NUM_GPUS_ACTOR:-8}
 TOTAL_TRAINING_STEPS=${TOTAL_TRAINING_STEPS:-1000}
+# Global mini-batch for DPO is doubled internally (chosen+rejected pairs). For N GPUs,
+# choose PPO_MINI_BATCH_SIZE so (PPO_MINI_BATCH_SIZE * 2) is divisible by N and <= train batch.
 PPO_MINI_BATCH_SIZE=${PPO_MINI_BATCH_SIZE:-4}
 PPO_MICRO_BATCH_SIZE_PER_GPU=${PPO_MICRO_BATCH_SIZE_PER_GPU:-1}
+TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE:-${NUM_GPUS_ACTOR}}
 LR=${LR:-1.0e-6}
 DPO_BETA=${DPO_BETA:-0.1}
 IMAGE_RATIO=${IMAGE_RATIO:-1.0}
@@ -19,6 +22,7 @@ VIDEO_RATIO=${VIDEO_RATIO:-1.0}
 AUDIO_RATIO=${AUDIO_RATIO:-1.0}
 
 export PYTHONPATH="${SCRIPT_DIR}/../../..${PYTHONPATH:+:${PYTHONPATH}}"
+export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
 
 python3 -m verl_omni.trainer.main_omni \
     algorithm.trainer_type=direct_preference \
@@ -26,7 +30,7 @@ python3 -m verl_omni.trainer.main_omni \
     algorithm.paired_preference=true \
     data.train_files="${TRAIN_FILES}" \
     data.val_files="${VAL_FILES}" \
-    data.train_batch_size=4 \
+    data.train_batch_size="${TRAIN_BATCH_SIZE}" \
     data.max_prompt_length=256 \
     data.trust_remote_code=true \
     data.filter_overlong_prompts=false \
@@ -67,6 +71,12 @@ python3 -m verl_omni.trainer.main_omni \
     actor_rollout_ref.actor.veomni_config.enable_activation_offload=true \
     actor_rollout_ref.actor.veomni_config.activation_gpu_limit=4.0 \
     actor_rollout_ref.actor.use_kl_loss=false \
+    actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu="${PPO_MICRO_BATCH_SIZE_PER_GPU}" \
+    actor_rollout_ref.ref.veomni_config.model_dtype=bfloat16 \
+    actor_rollout_ref.ref.veomni_config.init_device=meta \
+    actor_rollout_ref.ref.veomni_config.forward_only=true \
+    actor_rollout_ref.ref.veomni_config.param_offload=true \
+    actor_rollout_ref.ref.veomni_config.reshard_after_forward=false \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1 \
     trainer.resume_mode=disable \
     trainer.logger='["console", "wandb"]' \
