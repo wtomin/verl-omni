@@ -85,6 +85,19 @@ _NON_MODEL_KEYS = {
     "use_remove_padding",
 }
 
+# Text tensors rebuilt by the packed->dense unpack step, and the multimodal
+# placeholder masks consumed there. These are excluded from the dict handed to
+# the HF forward and replaced with the per-branch (2N-row) tensors.
+_UNPACK_KEYS = {
+    "input_ids",
+    "attention_mask",
+    "position_ids",
+    "labels",
+    "image_mask",
+    "video_mask",
+    "audio_mask",
+}
+
 
 @EngineRegistry.register(model_type="omni_model", backend=["fsdp", "fsdp2"], device=["cuda"])
 class OmniFSDPEngine(LoRAAdapterMixin, BaseEngine):
@@ -107,6 +120,7 @@ class OmniFSDPEngine(LoRAAdapterMixin, BaseEngine):
         self._is_offload_param = self.engine_config.param_offload
         self._is_offload_optimizer = self.engine_config.optimizer_offload
         self._is_lora = self.model_config.lora_rank > 0 or self.model_config.lora_adapter_path is not None
+        self._placeholder_token_ids: Optional[dict[str, Optional[int]]] = None
         self._init_device_mesh()
         if self.engine_config.full_determinism:
             enable_full_determinism(seed=self.engine_config.seed)
@@ -347,15 +361,113 @@ class OmniFSDPEngine(LoRAAdapterMixin, BaseEngine):
         finally:
             module.enable_adapters()
 
-    def _prepare_model_inputs(self, micro_batch: TensorDict | dict[str, Any]) -> tuple[dict[str, Any], torch.Tensor]:
+    def _get_placeholder_token_ids(self) -> dict[str, Optional[int]]:
+        """Multimodal placeholder token ids, matching the dataset transform.
+
+        The dataset (VeOmni convention) zeroes the multimodal placeholder ids in
+        ``input_ids`` and tracks their positions in ``image_mask``/``video_mask``/
+        ``audio_mask``. The HF forward instead locates placeholders via
+        ``input_ids == config.<x>_token_id``, so we restore the real ids here.
+        """
+        if self._placeholder_token_ids is None:
+            processor = self.model_config.get_processor()
+            tokenizer = getattr(processor, "tokenizer", processor)
+            vocab = tokenizer.get_vocab()
+            self._placeholder_token_ids = {
+                "image": vocab.get("<|image_pad|>", vocab.get("<|IMAGE|>")),
+                "video": vocab.get("<|video_pad|>", vocab.get("<|VIDEO|>")),
+                "audio": vocab.get("<|audio_pad|>", vocab.get("<|AUDIO|>")),
+            }
+        return self._placeholder_token_ids
+
+    def _unpack_paired_rows(
+        self, micro_batch: TensorDict | dict[str, Any]
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Split packed ``[chosen; rejected]`` rows into a dense ``2N``-row batch.
+
+        The dataset packs each preference pair into a single row (chosen then
+        rejected along the sequence dim) for the VeOmni varlen forward. The HF
+        forward used here has no varlen isolation, so we split each row into two
+        independent branches (detected via per-branch ``position_ids`` resets),
+        restore the multimodal placeholder ids, and re-pad into ``[chosen0,
+        rejected0, chosen1, rejected1, ...]`` order. That order matches the
+        multimodal feature order produced by the adapter, so ``masked_scatter``
+        in the HF forward consumes features correctly without manual routing.
+        """
+        input_ids = micro_batch["input_ids"].clone()
+        attention_mask = micro_batch["attention_mask"]
         labels = micro_batch["labels"]
-        model_inputs = {key: value for key, value in micro_batch.items() if key not in _NON_MODEL_KEYS}
-        model_inputs.pop("labels", None)
+        position_ids = micro_batch["position_ids"]
+
+        token_ids = self._get_placeholder_token_ids()
+        for name, mask_key in (("image", "image_mask"), ("video", "video_mask"), ("audio", "audio_mask")):
+            mask = micro_batch.get(mask_key, None)
+            token_id = token_ids.get(name)
+            if mask is not None and token_id is not None:
+                input_ids[mask.bool()] = token_id
+
+        has_mrope = position_ids.dim() == 3  # (B, 3, L)
+        pos_reset_signal = position_ids.sum(dim=1) if has_mrope else position_ids  # (B, L)
+
+        seg_input_ids: list[torch.Tensor] = []
+        seg_labels: list[torch.Tensor] = []
+        seg_attn: list[torch.Tensor] = []
+        seg_pos: list[torch.Tensor] = []
+        for b in range(input_ids.shape[0]):
+            valid = attention_mask[b].bool()
+            valid_len = int(valid.sum().item())
+            starts = torch.nonzero((pos_reset_signal[b] == 0) & valid, as_tuple=False).flatten().tolist()
+            if len(starts) != 2:
+                raise ValueError(
+                    "Omni FSDP DPO expects exactly 2 packed sub-sequences (chosen, rejected) per row, "
+                    f"but found {len(starts)} position-id resets. Check the paired-preference dataset."
+                )
+            for start, end in ((starts[0], starts[1]), (starts[1], valid_len)):
+                seg_input_ids.append(input_ids[b, start:end])
+                seg_labels.append(labels[b, start:end])
+                seg_attn.append(attention_mask[b, start:end])
+                seg_pos.append(position_ids[b, :, start:end] if has_mrope else position_ids[b, start:end])
+
+        max_len = max(int(seg.shape[-1]) for seg in seg_input_ids)
+
+        def _pad_1d(tensor: torch.Tensor, pad_value: int) -> torch.Tensor:
+            if tensor.shape[-1] == max_len:
+                return tensor
+            out = tensor.new_full((max_len,), pad_value)
+            out[: tensor.shape[-1]] = tensor
+            return out
+
+        def _pad_pos(tensor: torch.Tensor) -> torch.Tensor:
+            if tensor.shape[-1] == max_len:
+                return tensor
+            shape = (*tensor.shape[:-1], max_len)
+            out = tensor.new_zeros(shape)
+            out[..., : tensor.shape[-1]] = tensor
+            return out
+
+        new_input_ids = torch.stack([_pad_1d(seg, 0) for seg in seg_input_ids], dim=0)
+        new_labels = torch.stack([_pad_1d(seg, -100) for seg in seg_labels], dim=0)
+        new_attn = torch.stack([_pad_1d(seg, 0) for seg in seg_attn], dim=0)
+        # HF thinker rotary expects mrope position_ids as (3, batch, seq); the dataset
+        # collates them as (batch, 3, seq), so stack the per-branch (3, seq) segments
+        # along the new batch axis (dim=1) to yield (3, 2N, seq).
+        padded_pos = [_pad_pos(seg) for seg in seg_pos]
+        new_pos = torch.stack(padded_pos, dim=1) if has_mrope else torch.stack(padded_pos, dim=0)
+        return new_input_ids, new_attn, new_pos, new_labels
+
+    def _prepare_model_inputs(self, micro_batch: TensorDict | dict[str, Any]) -> tuple[dict[str, Any], torch.Tensor]:
+        new_input_ids, new_attention_mask, new_position_ids, labels = self._unpack_paired_rows(micro_batch)
+        model_inputs = {
+            key: value for key, value in micro_batch.items() if key not in _NON_MODEL_KEYS and key not in _UNPACK_KEYS
+        }
         model_inputs = prepare_omni_model_inputs(
             self.model_config,
             model_inputs,
             dtype=next(self.module.parameters()).dtype,
         )
+        model_inputs["input_ids"] = new_input_ids
+        model_inputs["attention_mask"] = new_attention_mask
+        model_inputs["position_ids"] = new_position_ids
         return model_inputs, labels
 
     @staticmethod
