@@ -15,9 +15,6 @@
 from .actor import (
     FSDPOmniActorConfig,
     OmniLossConfig,
-    VeOmniOmniActorConfig,
-    VeOmniOmniEngineConfig,
-    VeOmniOmniOptimizerConfig,
 )
 from .model import OmniModelConfig
 
@@ -25,7 +22,4 @@ __all__ = [
     "FSDPOmniActorConfig",
     "OmniLossConfig",
     "OmniModelConfig",
-    "VeOmniOmniActorConfig",
-    "VeOmniOmniEngineConfig",
-    "VeOmniOmniOptimizerConfig",
 ]

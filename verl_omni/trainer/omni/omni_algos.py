@@ -21,7 +21,7 @@ import torch
 import torch.nn.functional as F
 from tensordict import TensorDict
 
-from verl_omni.workers.config import VeOmniOmniActorConfig
+from verl_omni.workers.config import FSDPOmniActorConfig
 
 
 @dataclass
@@ -104,7 +104,7 @@ class OmniDPOLoss:
     def __call__(
         self,
         *,
-        config: VeOmniOmniActorConfig,
+        config: FSDPOmniActorConfig,
         model_output: dict[str, Any],
         data: TensorDict,
     ) -> OmniLossResult:

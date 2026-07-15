@@ -8,7 +8,7 @@
 defaults:
 
   # Omni model engine config.
-  - omni/model_engine: veomni_omni
+  - omni/model_engine: fsdp_omni
 
   # Omni actor config.
   - omni/actor@actor_rollout_ref.actor: ${omni/model_engine}_actor

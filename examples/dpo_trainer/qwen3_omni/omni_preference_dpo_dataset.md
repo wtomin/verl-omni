@@ -265,8 +265,10 @@ To train on a single modality, list only that modality's parquet path and set
 the corresponding source name/weight.
 
 See
-[`tests/special_e2e/run_qwen3_omni_thinker_only_offline_mllm_dpo_smoke.sh`](../../../tests/special_e2e/run_qwen3_omni_thinker_only_offline_mllm_dpo_smoke.sh)
-for an example launch script.
+[`examples/dpo_trainer/qwen3_omni/run_qwen3_omni_thinker_only_offline_mllm_dpo_lora.sh`](run_qwen3_omni_thinker_only_offline_mllm_dpo_lora.sh)
+and
+[`tests/special_e2e/run_qwen3_omni_thinker_only_offline_mllm_dpo_lora_smoke.sh`](../../../tests/special_e2e/run_qwen3_omni_thinker_only_offline_mllm_dpo_lora_smoke.sh)
+for example launch scripts.
 
 ---
 

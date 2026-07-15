@@ -13,6 +13,5 @@
 # limitations under the License.
 
 from .diffusion_impl import VeOmniDiffusionEngine
-from .omni_impl import VeOmniOmniEngine
 
-__all__ = ["VeOmniDiffusionEngine", "VeOmniOmniEngine"]
+__all__ = ["VeOmniDiffusionEngine"]

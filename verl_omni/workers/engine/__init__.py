@@ -20,10 +20,9 @@ from .fsdp import (  # noqa: F401
 )
 
 try:
-    from .veomni import VeOmniDiffusionEngine, VeOmniOmniEngine  # noqa: F401
+    from .veomni import VeOmniDiffusionEngine  # noqa: F401
 except ImportError:
     VeOmniDiffusionEngine = None
-    VeOmniOmniEngine = None
 
 __all__ = [
     "PPODiffusersFSDPEngine",
@@ -32,5 +31,4 @@ __all__ = [
     "DiffusersFSDPEngine",
     "OmniFSDPEngine",
     "VeOmniDiffusionEngine",
-    "VeOmniOmniEngine",
 ]

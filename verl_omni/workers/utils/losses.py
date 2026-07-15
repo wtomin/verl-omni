@@ -20,7 +20,7 @@ from verl.utils.metric import AggregationType, Metric
 
 from verl_omni.trainer.diffusion.diffusion_algos import get_diffusion_loss_fn
 from verl_omni.trainer.omni.omni_algos import get_omni_loss_fn
-from verl_omni.workers.config import DiffusionActorConfig, VeOmniOmniActorConfig
+from verl_omni.workers.config import DiffusionActorConfig, FSDPOmniActorConfig
 
 
 def _apply_bypass_rc(
@@ -121,7 +121,7 @@ def diffusion_loss(config: DiffusionActorConfig, model_output, data: TensorDict,
     return loss_value, metrics
 
 
-def omni_loss(config: VeOmniOmniActorConfig, model_output=None, data: TensorDict | None = None, dp_group=None):
+def omni_loss(config: FSDPOmniActorConfig, model_output=None, data: TensorDict | None = None, dp_group=None):
     """Compute loss for omni models."""
     del dp_group
     if model_output is None or data is None:
