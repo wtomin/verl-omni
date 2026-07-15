@@ -75,6 +75,7 @@ python3 -m verl_omni.trainer.main_omni \
     actor_rollout_ref.actor.veomni_config.model_dtype=bfloat16 \
     actor_rollout_ref.actor.veomni_config.init_device=meta \
     actor_rollout_ref.actor.veomni_config.param_offload=false \
+    actor_rollout_ref.actor.veomni_config.reshard_after_forward=false \
     actor_rollout_ref.actor.veomni_config.optimizer_offload=false \
     actor_rollout_ref.actor.use_kl_loss=false \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=1 \
@@ -82,6 +83,7 @@ python3 -m verl_omni.trainer.main_omni \
     actor_rollout_ref.ref.veomni_config.init_device=meta \
     actor_rollout_ref.ref.veomni_config.forward_only=true \
     actor_rollout_ref.ref.veomni_config.param_offload=false \
+    actor_rollout_ref.ref.veomni_config.reshard_after_forward=false \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1 \
     trainer.resume_mode=disable \
     trainer.logger='["console"]' \
