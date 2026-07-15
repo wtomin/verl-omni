@@ -58,7 +58,7 @@ python3 -m verl_omni.trainer.main_omni \
     actor_rollout_ref.model.external_lib='["verl_omni.models.transformers.qwen3_omni_thinker","verl_omni.pipelines.qwen3_omni_dpo"]' \
     actor_rollout_ref.model.lora_rank="${LORA_RANK}" \
     actor_rollout_ref.model.lora_alpha="${LORA_ALPHA}" \
-    actor_rollout_ref.model.target_modules=q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj \
+    actor_rollout_ref.model.target_modules='[q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj]' \
     actor_rollout_ref.model.exclude_modules='.*talker.*|.*code2wav.*|.*code_predictor.*|.*visual.*|.*audio_tower.*' \
     actor_rollout_ref.actor.omni_loss.loss_mode=dpo \
     actor_rollout_ref.actor.omni_loss.beta="${DPO_BETA}" \
