@@ -62,7 +62,7 @@ python3 -m verl_omni.trainer.main_omni \
     actor_rollout_ref.model.config_path="${MODEL_PATH}" \
     actor_rollout_ref.model.tokenizer_path="${MODEL_PATH}" \
     actor_rollout_ref.model.trust_remote_code=true \
-    actor_rollout_ref.model.external_lib=verl_omni.models.transformers.qwen3_omni_thinker \
+    actor_rollout_ref.model.external_lib='["verl_omni.models.transformers.qwen3_omni_thinker","verl_omni.pipelines.qwen3_omni_dpo"]' \
     actor_rollout_ref.actor.omni_loss.loss_mode=dpo \
     actor_rollout_ref.actor.omni_loss.beta=0.1 \
     actor_rollout_ref.actor.omni_loss.label_smoothing=0.0 \
@@ -78,6 +78,11 @@ python3 -m verl_omni.trainer.main_omni \
     actor_rollout_ref.actor.veomni_config.param_offload=false \
     actor_rollout_ref.actor.veomni_config.optimizer_offload=false \
     actor_rollout_ref.actor.use_kl_loss=false \
+    actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=1 \
+    actor_rollout_ref.ref.veomni_config.model_dtype=bfloat16 \
+    actor_rollout_ref.ref.veomni_config.init_device=meta \
+    actor_rollout_ref.ref.veomni_config.forward_only=true \
+    actor_rollout_ref.ref.veomni_config.param_offload=false \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1 \
     trainer.resume_mode=disable \
     trainer.logger='["console"]' \
