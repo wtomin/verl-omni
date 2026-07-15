@@ -332,7 +332,7 @@ def patch_hf_tokenizer_for_qwen3_omni() -> None:
 
 def apply_qwen3_omni_thinker_patches() -> None:
     """Apply all Qwen3-Omni Thinker patches (idempotent registrations)."""
-    import verl_omni.pipelines.qwen3_omni_dpo.veomni_training_adapter  # noqa: F401
+    import verl_omni.pipelines.qwen3_omni_dpo  # noqa: F401
 
     _register_qwen3_omni_automodel()
     patch_hf_processor_for_qwen3_omni()

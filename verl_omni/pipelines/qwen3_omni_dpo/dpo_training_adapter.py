@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Qwen3-Omni DPO training-side adapter for the VeOmni engine."""
+"""Qwen3-Omni DPO training-side adapter shared by omni training engines."""
 
 from typing import Any
 
@@ -25,7 +25,7 @@ __all__ = ["Qwen3OmniDPO"]
 
 @OmniTrainingAdapterBase.register("Qwen3OmniMoeForConditionalGeneration", algorithm="dpo")
 class Qwen3OmniDPO(OmniTrainingAdapterBase):
-    """Prepare Qwen3-Omni processor outputs for VeOmni offline DPO training."""
+    """Prepare Qwen3-Omni processor outputs for offline DPO training."""
 
     @staticmethod
     def _drop_zero_rows(tensor: torch.Tensor) -> torch.Tensor:

@@ -62,5 +62,5 @@ class OmniTrainingAdapterBase(ABC):
     @classmethod
     @abstractmethod
     def prepare_model_inputs(cls, model_inputs: dict[str, Any], dtype: torch.dtype) -> dict[str, Any]:
-        """Build architecture-specific model inputs for a VeOmni forward pass."""
+        """Build architecture-specific model inputs for an omni model forward pass."""
         pass

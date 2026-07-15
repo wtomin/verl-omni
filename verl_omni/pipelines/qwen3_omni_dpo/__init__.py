@@ -12,6 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .veomni_training_adapter import Qwen3OmniDPO
+from .dpo_training_adapter import Qwen3OmniDPO
 
 __all__ = ["Qwen3OmniDPO"]
