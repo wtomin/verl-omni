@@ -13,6 +13,7 @@
 # limitations under the License.
 
 from .actor import (
+    FSDPOmniActorConfig,
     OmniLossConfig,
     VeOmniOmniActorConfig,
     VeOmniOmniEngineConfig,
@@ -21,6 +22,7 @@ from .actor import (
 from .model import OmniModelConfig
 
 __all__ = [
+    "FSDPOmniActorConfig",
     "OmniLossConfig",
     "OmniModelConfig",
     "VeOmniOmniActorConfig",

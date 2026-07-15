@@ -1,0 +1,134 @@
+# Format checks enforced on CI:
+# 1. Comments must appear above each field.
+# 2. There must be a blank line between each field.
+# 3. Inline comments (after a field on the same line) are not allowed.
+# 4. Indentation level is respected for nested fields.
+
+# Defaults specify the default config from each component.
+defaults:
+
+  # FSDP optimizer config.
+  - ../../optim@optim: fsdp
+
+  # FSDP engine config.
+  - ../../diffusion/engine@fsdp_config: diffusion_fsdp
+
+  # Per-role profiler config.
+  - ../../profiler@profiler: profiler
+
+  # Load this config after defaults.
+  - _self_
+
+# Target class for this configuration.
+_target_: verl_omni.workers.config.omni.FSDPOmniActorConfig
+
+# Number of rollouts per update.
+rollout_n: ${oc.select:actor_rollout_ref.rollout.n,1}
+
+# Training strategy.
+strategy: fsdp
+
+# Split each sample into sub-batches of this size for PPO.
+ppo_mini_batch_size: 256
+
+# Local per-GPU micro batch size.
+ppo_micro_batch_size_per_gpu: ???
+
+# Number of PPO epochs per batch.
+ppo_epochs: 1
+
+# Shuffle training data across PPO epochs.
+shuffle: false
+
+# The seed used to construct mini-batches.
+data_loader_seed: 42
+
+# Loss scale factor, if applicable.
+loss_scale_factor: null
+
+# Whether to use KL loss.
+use_kl_loss: false
+
+# KL loss coefficient when use_kl_loss is enabled.
+kl_loss_coef: 0.001
+
+# The batch size for one forward pass in log-prob computation.
+log_prob_micro_batch_size_per_gpu: null
+
+# Store global batch info for loss aggregation.
+global_batch_info: {}
+
+# Omni loss config.
+omni_loss:
+
+  # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+  _target_: verl_omni.workers.config.omni.OmniLossConfig
+
+  # Loss function mode.
+  loss_mode: dpo
+
+  # DPO inverse temperature.
+  beta: 0.1
+
+  # DPO label smoothing.
+  label_smoothing: 0.0
+
+  # DPO loss type.
+  loss_type: sigmoid
+
+  # Whether to train without a reference policy.
+  reference_free: false
+
+  # Whether to average log probabilities before DPO.
+  average_log_prob: false
+
+  # Precision for the reference model.
+  refer_model_precision: bfloat16
+
+# Checkpoint configs.
+checkpoint:
+
+  # Target class for this configuration
+  _target_: verl.trainer.config.CheckpointConfig
+
+  # What to include in saved checkpoints
+  save_contents: ['model', 'optimizer', 'extra']
+
+  # Contents to load from checkpoints.
+  load_contents: ${.save_contents}
+
+  # Whether to save checkpoints asynchronously.
+  async_save: false
+
+# Optimizer config.
+optim:
+
+  # Learning rate
+  lr: 1e-6
+
+  # Weight decay
+  weight_decay: 0.01
+
+# Engine config placeholder populated by fsdp_config.
+engine: {}
+
+# Model config placeholder populated by the worker.
+model_config: {}
+
+# FSDP config.
+fsdp_config:
+
+  # Target class for this configuration
+  _target_: verl.workers.config.FSDPEngineConfig
+
+  # Model dtype.
+  model_dtype: bfloat16
+
+  # Use original parameters for FSDP1 LoRA compatibility.
+  use_orig_params: true
+
+  # Policy for wrapping the model.
+  wrap_policy:
+
+    # Minimum number of parameters to trigger wrapping a layer with FSDP.
+    min_num_params: 100000000

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Qwen3-Omni offline MLLM DPO through verl-omni entrypoint with VeOmni backend.
+# Qwen3-Omni offline MLLM DPO LoRA through the FSDP/FSDP2 omni backend.
 set -xeuo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -10,12 +10,15 @@ TRAIN_FILES=${TRAIN_FILES:-"['${DATA_DIR}/image/train.parquet','${DATA_DIR}/vide
 VAL_FILES=${VAL_FILES:-"['${DATA_DIR}/image/test.parquet','${DATA_DIR}/video/test.parquet','${DATA_DIR}/audio/test.parquet']"}
 NUM_GPUS_ACTOR=${NUM_GPUS_ACTOR:-8}
 TOTAL_TRAINING_STEPS=${TOTAL_TRAINING_STEPS:-1000}
+TRAINER_BACKEND=${TRAINER_BACKEND:-fsdp2}
 
 PPO_MINI_BATCH_SIZE=${PPO_MINI_BATCH_SIZE:-8}
 PPO_MICRO_BATCH_SIZE_PER_GPU=${PPO_MICRO_BATCH_SIZE_PER_GPU:-1}
 TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE:-${NUM_GPUS_ACTOR}}
 LR=${LR:-1.0e-6}
 DPO_BETA=${DPO_BETA:-0.1}
+LORA_RANK=${LORA_RANK:-64}
+LORA_ALPHA=${LORA_ALPHA:-32}
 IMAGE_RATIO=${IMAGE_RATIO:-1.0}
 VIDEO_RATIO=${VIDEO_RATIO:-1.0}
 AUDIO_RATIO=${AUDIO_RATIO:-1.0}
@@ -25,6 +28,7 @@ export PYTHONPATH="${SCRIPT_DIR}/../../..${PYTHONPATH:+:${PYTHONPATH}}"
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
 
 python3 -m verl_omni.trainer.main_omni \
+    omni/model_engine=fsdp_omni \
     algorithm.trainer_type=direct_preference \
     algorithm.sample_source=offline \
     algorithm.paired_preference=true \
@@ -52,36 +56,32 @@ python3 -m verl_omni.trainer.main_omni \
     actor_rollout_ref.model.tokenizer_path="${MODEL_PATH}" \
     actor_rollout_ref.model.trust_remote_code=true \
     actor_rollout_ref.model.external_lib='["verl_omni.models.transformers.qwen3_omni_thinker","verl_omni.pipelines.qwen3_omni_dpo"]' \
+    actor_rollout_ref.model.lora_rank="${LORA_RANK}" \
+    actor_rollout_ref.model.lora_alpha="${LORA_ALPHA}" \
+    actor_rollout_ref.model.target_modules=q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj \
+    actor_rollout_ref.model.exclude_modules='.*talker.*|.*code2wav.*|.*code_predictor.*|.*visual.*|.*audio_tower.*' \
     actor_rollout_ref.actor.omni_loss.loss_mode=dpo \
     actor_rollout_ref.actor.omni_loss.beta="${DPO_BETA}" \
     actor_rollout_ref.actor.omni_loss.label_smoothing=0.0 \
     actor_rollout_ref.actor.omni_loss.loss_type=sigmoid \
     actor_rollout_ref.actor.omni_loss.reference_free=false \
     actor_rollout_ref.actor.omni_loss.average_log_prob=false \
-    actor_rollout_ref.actor.omni_loss.refer_model_precision=bfloat16 \
     actor_rollout_ref.actor.optim.lr="${LR}" \
     actor_rollout_ref.actor.optim.weight_decay=0.01 \
     actor_rollout_ref.actor.ppo_mini_batch_size="${PPO_MINI_BATCH_SIZE}" \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu="${PPO_MICRO_BATCH_SIZE_PER_GPU}" \
-    actor_rollout_ref.actor.veomni_config.model_dtype=bfloat16 \
-    actor_rollout_ref.actor.veomni_config.init_device=meta \
-    actor_rollout_ref.actor.veomni_config.param_offload=true \
-    actor_rollout_ref.actor.veomni_config.reshard_after_forward=false \
-    actor_rollout_ref.actor.veomni_config.optimizer_offload=true \
-    actor_rollout_ref.actor.veomni_config.enable_activation_offload=true \
-    actor_rollout_ref.actor.veomni_config.activation_gpu_limit=4.0 \
+    actor_rollout_ref.actor.strategy="${TRAINER_BACKEND}" \
+    actor_rollout_ref.actor.fsdp_config.model_dtype=bfloat16 \
+    actor_rollout_ref.actor.fsdp_config.param_offload=true \
+    actor_rollout_ref.actor.fsdp_config.optimizer_offload=true \
+    actor_rollout_ref.actor.fsdp_config.reshard_after_forward=false \
+    actor_rollout_ref.actor.fsdp_config.use_orig_params=true \
     actor_rollout_ref.actor.use_kl_loss=false \
-    actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu="${PPO_MICRO_BATCH_SIZE_PER_GPU}" \
-    actor_rollout_ref.ref.veomni_config.model_dtype=bfloat16 \
-    actor_rollout_ref.ref.veomni_config.init_device=meta \
-    actor_rollout_ref.ref.veomni_config.forward_only=true \
-    actor_rollout_ref.ref.veomni_config.param_offload=true \
-    actor_rollout_ref.ref.veomni_config.reshard_after_forward=false \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1 \
     trainer.resume_mode=disable \
     trainer.logger='["console", "wandb"]' \
     trainer.project_name=qwen3_omni_offline_dpo \
-    trainer.experiment_name=qwen3_omni_thinker_veomni_dpo \
+    trainer.experiment_name=qwen3_omni_thinker_fsdp_lora_dpo \
     trainer.val_before_train=false \
     trainer.n_gpus_per_node="${NUM_GPUS_ACTOR}" \
     trainer.save_freq=30 \

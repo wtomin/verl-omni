@@ -19,13 +19,14 @@ from omegaconf import MISSING
 from verl.base_config import BaseConfig
 from verl.trainer.config import CheckpointConfig
 from verl.utils.profiler import ProfilerConfig
-from verl.workers.config.engine import EngineConfig
-from verl.workers.config.optimizer import OptimizerConfig
+from verl.workers.config.engine import EngineConfig, FSDPEngineConfig
+from verl.workers.config.optimizer import FSDPOptimizerConfig, OptimizerConfig
 
 from .model import OmniModelConfig
 
 __all__ = [
     "OmniLossConfig",
+    "FSDPOmniActorConfig",
     "VeOmniOmniEngineConfig",
     "VeOmniOmniOptimizerConfig",
     "VeOmniOmniActorConfig",
@@ -141,3 +142,40 @@ class VeOmniOmniActorConfig(BaseConfig):
         assert self.strategy == "veomni"
         assert self.rollout_n != MISSING
         self.engine = self.veomni_config
+
+
+@dataclass
+class FSDPOmniActorConfig(BaseConfig):
+    _mutable_fields = BaseConfig._mutable_fields | {
+        "ppo_mini_batch_size",
+        "ppo_micro_batch_size_per_gpu",
+        "engine",
+        "model_config",
+    }
+
+    strategy: str = "fsdp"
+    ppo_mini_batch_size: int = 256
+    ppo_micro_batch_size_per_gpu: int = MISSING
+    ppo_epochs: int = 1
+    shuffle: bool = False
+    data_loader_seed: int = 42
+    loss_scale_factor: Optional[float] = None
+    use_kl_loss: bool = False
+    kl_loss_coef: float = 0.001
+    rollout_n: int = MISSING
+    log_prob_micro_batch_size_per_gpu: Optional[int] = None
+    global_batch_info: dict = field(default_factory=dict)
+    omni_loss: OmniLossConfig = field(default_factory=OmniLossConfig)
+    checkpoint: CheckpointConfig = field(default_factory=CheckpointConfig)
+    fsdp_config: FSDPEngineConfig = field(default_factory=FSDPEngineConfig)
+    optim: FSDPOptimizerConfig = field(default_factory=FSDPOptimizerConfig)
+    engine: BaseConfig = field(default_factory=BaseConfig)
+    model_config: OmniModelConfig = field(default_factory=BaseConfig)
+    profiler: Optional[ProfilerConfig] = None
+
+    def __post_init__(self):
+        if self.strategy not in {"fsdp", "fsdp2"}:
+            raise ValueError(f"FSDP omni actor requires strategy='fsdp' or 'fsdp2', got {self.strategy!r}")
+        assert self.rollout_n != MISSING
+        self.engine = self.fsdp_config
+        object.__setattr__(self.engine, "strategy", self.strategy)

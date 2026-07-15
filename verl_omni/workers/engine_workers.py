@@ -658,8 +658,8 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 checkpoint_config=actor_config.checkpoint,
             )
 
-            if is_diffusion:
-                # Diffusion models don't use dynamic batching or token packing.
+            if is_diffusion or is_omni_model:
+                # Diffusion/omni models don't use dynamic batching or token packing.
                 # Only micro_batch_size_per_gpu configs are needed.
                 actor_training_config.engine_config.micro_batch_size_per_gpu = (
                     self.config.actor.ppo_micro_batch_size_per_gpu
@@ -669,7 +669,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                     actor_infer_micro_bsz = self.config.actor.ppo_micro_batch_size_per_gpu
                 actor_training_config.engine_config.infer_micro_batch_size_per_gpu = actor_infer_micro_bsz
                 assert actor_training_config.engine_config.infer_micro_batch_size_per_gpu is not None, (
-                    "Diffusion infer_batch requires rollout.log_prob_micro_batch_size_per_gpu or "
+                    "Diffusion/omni infer_batch requires rollout.log_prob_micro_batch_size_per_gpu or "
                     "actor.ppo_micro_batch_size_per_gpu (used by prepare_micro_batches)."
                 )
             else:

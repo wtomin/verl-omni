@@ -7,14 +7,17 @@
 # Specify the default per-component configs.
 defaults:
 
+  # Omni model engine config.
+  - omni/model_engine: veomni_omni
+
   # Omni actor config.
-  - omni/actor@actor_rollout_ref.actor: omni_actor
+  - omni/actor@actor_rollout_ref.actor: ${omni/model_engine}_actor
 
   # Data config.
   - data@data: legacy_data
 
   # Omni reference config.
-  - omni/ref@actor_rollout_ref.ref: omni_ref
+  - omni/ref@actor_rollout_ref.ref: ${omni/model_engine}_ref
 
   # Omni rollout config.
   - omni/rollout@actor_rollout_ref.rollout: omni_rollout
@@ -27,9 +30,6 @@ defaults:
 
   # Load this config after defaults.
   - _self_
-
-# Omni model engine name.
-model_engine: veomni_omni
 
 # Config for actor, rollout and reference model.
 actor_rollout_ref:

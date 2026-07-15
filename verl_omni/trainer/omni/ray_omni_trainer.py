@@ -87,6 +87,8 @@ class OmniDirectPreferenceRayTrainer(DirectPreferenceRayTrainer):
             use_dynamic_bsz=False,
         )
         if self.ref_in_actor:
+            tu.assign_non_tensor(batch_td, no_lora_adapter=True)
+        if self.ref_in_actor:
             output = self.actor_rollout_wg.infer_actor_batch(batch_td)
         else:
             output = self.ref_policy_wg.infer_ref_batch(batch_td)

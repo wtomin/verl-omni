@@ -1,0 +1,8 @@
+# Defaults specify the existing VeOmni omni reference config.
+defaults:
+
+  # Existing VeOmni omni reference config.
+  - omni_ref
+
+  # Load this config after defaults.
+  - _self_
