@@ -10,9 +10,8 @@ TRAIN_FILES=${TRAIN_FILES:-"['${DATA_DIR}/image/train.parquet','${DATA_DIR}/vide
 VAL_FILES=${VAL_FILES:-"['${DATA_DIR}/image/test.parquet','${DATA_DIR}/video/test.parquet','${DATA_DIR}/audio/test.parquet']"}
 NUM_GPUS_ACTOR=${NUM_GPUS_ACTOR:-8}
 TOTAL_TRAINING_STEPS=${TOTAL_TRAINING_STEPS:-1000}
-# Global mini-batch for DPO is doubled internally (chosen+rejected pairs). For N GPUs,
-# choose PPO_MINI_BATCH_SIZE so (PPO_MINI_BATCH_SIZE * 2) is divisible by N and <= train batch.
-PPO_MINI_BATCH_SIZE=${PPO_MINI_BATCH_SIZE:-4}
+
+PPO_MINI_BATCH_SIZE=${PPO_MINI_BATCH_SIZE:-8}
 PPO_MICRO_BATCH_SIZE_PER_GPU=${PPO_MICRO_BATCH_SIZE_PER_GPU:-1}
 TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE:-${NUM_GPUS_ACTOR}}
 LR=${LR:-1.0e-6}
