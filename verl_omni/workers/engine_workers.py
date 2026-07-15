@@ -622,14 +622,14 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
             # assign engine configs
             ref_infer_micro_bsz = self.config.ref.ppo_micro_batch_size_per_gpu
-            if ref_infer_micro_bsz is None and is_diffusion:
+            if ref_infer_micro_bsz is None and (is_diffusion or is_omni_model):
                 # prepare_micro_batches requires a finite micro-batch; align with actor training micro-batch.
                 ref_infer_micro_bsz = self.config.actor.ppo_micro_batch_size_per_gpu
             ref_training_config.engine_config.infer_micro_batch_size_per_gpu = ref_infer_micro_bsz
             ref_training_config.engine_config.use_remove_padding = model_config.get("use_remove_padding", False)
-            if is_diffusion:
+            if is_diffusion or is_omni_model:
                 assert ref_training_config.engine_config.infer_micro_batch_size_per_gpu is not None, (
-                    "Diffusion ref infer_batch requires ref.log_prob_micro_batch_size_per_gpu or "
+                    "Diffusion/omni ref infer_batch requires ref.log_prob_micro_batch_size_per_gpu or "
                     "actor.ppo_micro_batch_size_per_gpu (used by prepare_micro_batches)."
                 )
             else:
