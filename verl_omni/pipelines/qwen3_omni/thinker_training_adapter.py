@@ -125,7 +125,7 @@ class Qwen3OmniThinkerAdapter(OmniModelBase):
     def _drop_zero_rows(tensor: torch.Tensor) -> torch.Tensor:
         if tensor.numel() == 0:
             return tensor
-        keep = tensor.reshape(tensor.shape[0], -1).abs().sum(dim=-1) != 0
+        keep = (tensor.reshape(tensor.shape[0], -1) != 0).any(dim=-1)
         return tensor[keep]
 
     @classmethod
