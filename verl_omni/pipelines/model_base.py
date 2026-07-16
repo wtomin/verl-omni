@@ -577,6 +577,22 @@ class OmniModelBase(ABC):
         pass
 
     @classmethod
+    @abstractmethod
+    def prepare_model_inputs(
+        cls,
+        model_config,
+        micro_batch: TensorDict,
+        *,
+        dtype: Optional[torch.dtype] = None,
+    ) -> dict[str, Any]:
+        """Build architecture-specific forward kwargs from a micro-batch.
+
+        Each omni model family extracts the keys it needs from ``micro_batch``
+        and applies any normalization before ``model(**model_inputs)``.
+        """
+        pass
+
+    @classmethod
     def configure_model(cls, module, model_config):
         """Configure the model after loading and before FSDP wrapping.
 
