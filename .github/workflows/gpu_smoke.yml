@@ -185,27 +185,35 @@ jobs:
           done < /tmp/gpu_smoke_groups.tsv
 
           failed=0
+          failed_names=()
           for i in "${!pids[@]}"; do
             if wait "${pids[$i]}"; then
               echo "[PASS] ${names[$i]}"
             else
               echo "[FAIL] ${names[$i]}"
               failed=1
+              failed_names+=("${names[$i]}")
             fi
           done
 
           echo ""
-          echo "===== GPU smoke parallel logs ====="
-          for name in "${names[@]}"; do
-            logfile="logs/gpu_smoke/parallel/${name}.log"
-            if [[ -f "${logfile}" ]]; then
-              echo "::group::${logfile}"
-              cat "${logfile}"
-              echo "::endgroup::"
-            else
-              echo "::warning::Missing GPU smoke log: ${logfile}"
-            fi
-          done
+          if [[ "${failed}" -eq 0 ]]; then
+            echo "===== All GPU smoke groups passed; skipping parallel logs ====="
+            echo "Full logs are uploaded as workflow artifacts under logs/gpu_smoke/"
+          else
+            echo "===== GPU smoke logs (failed groups only) ====="
+            for name in "${failed_names[@]}"; do
+              logfile="logs/gpu_smoke/parallel/${name}.log"
+              if [[ -f "${logfile}" ]]; then
+                echo "::group::${logfile}"
+                cat "${logfile}" || true
+                echo "::endgroup::"
+              else
+                echo "::warning::Missing GPU smoke log: ${logfile}"
+              fi
+            done
+            echo "Full logs for all groups are uploaded as workflow artifacts under logs/gpu_smoke/"
+          fi
 
           ray stop --force || true
           exit "${failed}"
