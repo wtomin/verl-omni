@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import os
 import uuid
+import warnings
 from collections import defaultdict
 from collections.abc import Sequence
 from pathlib import Path
@@ -34,7 +35,7 @@ from verl_omni.utils.dataset.qwen3_omni_transform import process_qwen3_omni_samp
 
 
 def _read_dataframe(data_files: str | Sequence[str]) -> pd.DataFrame:
-    paths = [data_files] if isinstance(data_files, (str, Path)) else list(data_files)
+    paths = [data_files] if isinstance(data_files, str | Path) else list(data_files)
     frames = []
     for data_file in paths:
         path = Path(os.path.expanduser(data_file))
@@ -332,14 +333,30 @@ class OfflineMLLMDPODataset(Dataset):
 
 
 class ModalityGroupedBatchSampler(Sampler[int]):
-    """Yield indices in same-modality chunks for regular DataLoader batching.
+    """Sample dataset indices as contiguous same-modality chunks.
 
-    ``StatefulDataLoader`` is configured with ``sampler=`` and ``batch_size=``,
-    not ``batch_sampler=``. This sampler therefore yields individual indices,
-    but orders them as contiguous same-modality chunks of ``batch_size``. When
-    Each chunk first samples a modality uniformly by default, or by
-    ``modality_sample_weights`` when provided, then samples rows from that
+    This sampler is used with ``StatefulDataLoader`` via ``sampler=`` and
+    ``batch_size=`` rather than ``batch_sampler=``. It yields individual
+    indices, but orders them so each DataLoader batch contains rows from one
+    modality. Each chunk samples a modality uniformly by default, or according
+    to ``modality_sample_weights`` when provided, then samples rows from that
     modality with replacement.
+
+    Args:
+        data_source: Dataset that provides ``get_modality(index)``.
+        dataset: Alternative name for ``data_source``.
+        data_config: Optional config used to infer ``batch_size`` from
+            ``gen_batch_size`` or ``train_batch_size``.
+        batch_size: Number of samples per same-modality chunk.
+        shuffle: Accepted for DataLoader compatibility and ignored.
+        drop_last: Whether to drop an incomplete final chunk when deriving the
+            number of chunks.
+        seed: Base random seed used for deterministic sampling by epoch.
+        modality_sample_weights: Optional sampling weight per modality.
+        num_batches: Optional explicit number of chunks to generate.
+
+    Returns:
+        Iterator over dataset indices ordered as same-modality chunks.
     """
 
     def __init__(
@@ -355,6 +372,13 @@ class ModalityGroupedBatchSampler(Sampler[int]):
         modality_sample_weights: dict[str, float] | None = None,
         num_batches: int | None = None,
     ):
+        if not shuffle:
+            warnings.warn(
+                "ModalityGroupedBatchSampler ignores shuffle=False; sampling order is controlled by modality "
+                "grouping, modality_sample_weights, and seed.",
+                UserWarning,
+                stacklevel=2,
+            )
         del shuffle
         self.data_source = data_source if data_source is not None else dataset
         if self.data_source is None:
