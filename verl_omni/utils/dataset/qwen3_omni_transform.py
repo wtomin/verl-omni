@@ -14,8 +14,9 @@
 
 """Qwen3-Omni sample transform for offline MLLM DPO without a VeOmni dependency.
 
-The logic mirrors VeOmni's ``process_sample_qwen_omni`` data transform and the
-minimal multimodal media helpers it relies on.
+Adapted from VeOmni's ``process_sample_qwen_omni`` data transform and the
+minimal multimodal media helpers it relies on:
+https://github.com/ByteDance-Seed/VeOmni/blob/main/veomni/data/data_transform.py
 """
 
 from __future__ import annotations
