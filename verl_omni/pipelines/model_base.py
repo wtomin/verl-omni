@@ -535,38 +535,6 @@ class OmniModelBase(ABC):
             ) from None
 
     @classmethod
-    def load_tokenizer_and_processor(cls, model_path: str, model_config) -> tuple[Any, Any]:
-        """Load tokenizer and processor via the registered omni adapter.
-
-        Args:
-            model_path: Local path to the model checkpoint.
-            model_config: Config object with ``architecture``, ``model_stage``,
-                ``external_lib``, and ``trust_remote_code`` (``OmniModelConfig``
-                or any compatible namespace).
-
-        Returns:
-            tuple[Any, Any]: ``(tokenizer, processor)``.
-        """
-        import json
-        import os
-
-        architecture = getattr(model_config, "architecture", None)
-        if architecture in (None, "???"):
-            config_path = os.path.join(model_path, "config.json")
-            with open(config_path) as config_file:
-                architecture = json.load(config_file)["architectures"][0]
-            model_config.architecture = architecture
-
-        adapter_cls = cls.get_class_by_name(
-            architecture,
-            getattr(model_config, "model_stage", "thinker"),
-            getattr(model_config, "external_lib", None),
-        )
-        tokenizer = adapter_cls.configure_tokenizer(model_path, model_config)
-        processor = adapter_cls.configure_processor(model_path, model_config)
-        return tokenizer, processor
-
-    @classmethod
     @abstractmethod
     def get_strip_modules(cls, model_config) -> list[str]:
         """Return submodule prefixes to strip before FSDP init.

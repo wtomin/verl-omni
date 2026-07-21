@@ -253,7 +253,13 @@ def load_qwen3_omni_lora_model(args: argparse.Namespace):
         lora_adapter_path=adapter_path,
     )
     logger.info("Stage 3/4: loading tokenizer and processor")
-    tokenizer, processor = OmniModelBase.load_tokenizer_and_processor(args.model_path, model_config)
+    adapter_cls = OmniModelBase.get_class_by_name(
+        model_config.architecture,
+        model_config.model_stage,
+        model_config.external_lib,
+    )
+    tokenizer = adapter_cls.configure_tokenizer(args.model_path, model_config)
+    processor = adapter_cls.configure_processor(args.model_path, model_config)
     model_config.processor = processor
 
     torch_dtype = resolve_dtype(args.dtype)

@@ -18,7 +18,6 @@ from unittest.mock import MagicMock
 import pytest
 from omegaconf import OmegaConf
 
-from verl_omni.pipelines.model_base import OmniModelBase
 from verl_omni.trainer.diffusion.ray_diffusion_trainer import DirectPreferenceRayTrainer, PolicyGradientRayTrainer
 from verl_omni.trainer.main_omni import RayTrainerTaskRunner, get_ray_trainer_cls, uses_v1_trainer
 from verl_omni.trainer.omni.ray_omni_dpo_trainer import OmniDirectPreferenceRayTrainer
@@ -92,8 +91,11 @@ class TestGetRayTrainerCls:
 
 
 class TestLoadTokenizerAndProcessor:
-    def test_omni_model_base_loads_via_registered_adapter(self, monkeypatch):
+    def test_omni_model_config_loads_tokenizer_and_processor_via_adapter(self, monkeypatch, tmp_path):
         from types import SimpleNamespace
+
+        from verl_omni.workers.config.omni import model as model_config_module
+        from verl_omni.workers.config.omni.model import OmniModelConfig
 
         mock_adapter = MagicMock()
         mock_adapter.configure_tokenizer.return_value = "tokenizer"
@@ -102,19 +104,27 @@ class TestLoadTokenizerAndProcessor:
             "verl_omni.pipelines.model_base.OmniModelBase.get_class_by_name",
             lambda *_args, **_kwargs: mock_adapter,
         )
+        monkeypatch.setattr(model_config_module, "resolve_model_local_dir", lambda path, use_shm=False: str(tmp_path))
+        monkeypatch.setattr(model_config_module, "copy_to_local", lambda path, use_shm=False: f"local:{path}")
+        monkeypatch.setattr(
+            model_config_module.AutoConfig,
+            "from_pretrained",
+            lambda *_args, **_kwargs: SimpleNamespace(tie_word_embeddings=False, architectures=["arch"]),
+        )
 
-        model_config = SimpleNamespace(
+        model_config = OmniModelConfig(
+            path=str(tmp_path),
             architecture="Qwen3OmniMoeForConditionalGeneration",
             model_stage="thinker",
+            tokenizer_path="tokenizer-path",
             external_lib=None,
             trust_remote_code=False,
         )
-        tokenizer, processor = OmniModelBase.load_tokenizer_and_processor("/tmp/model", model_config)
 
-        assert tokenizer == "tokenizer"
-        assert processor == "processor"
-        mock_adapter.configure_tokenizer.assert_called_once()
-        mock_adapter.configure_processor.assert_called_once()
+        assert model_config.tokenizer == "tokenizer"
+        assert model_config.processor == "processor"
+        mock_adapter.configure_tokenizer.assert_called_once_with("local:tokenizer-path", model_config)
+        mock_adapter.configure_processor.assert_called_once_with(str(tmp_path), model_config)
 
     def test_ray_task_runner_delegates_omni_model_to_adapter(self, monkeypatch, tmp_path):
         config = OmegaConf.create(
