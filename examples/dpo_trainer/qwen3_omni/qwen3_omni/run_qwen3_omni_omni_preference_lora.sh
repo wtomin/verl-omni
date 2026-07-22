@@ -91,7 +91,7 @@ python3 -m verl_omni.trainer.main_omni \
     actor_rollout_ref.model.target_modules="${LORA_TARGET_MODULES}" \
     actor_rollout_ref.model.target_parameters="${LORA_TARGET_PARAMETERS}" \
     actor_rollout_ref.model.exclude_modules="${EXCLUDE_MODULES}" \
-    actor_rollout_ref.model.use_remove_padding=true \
+    actor_rollout_ref.model.use_remove_padding=false \
     actor_rollout_ref.actor.trainer_type=direct_preference \
     actor_rollout_ref.actor.omni_loss.loss_mode=dpo \
     actor_rollout_ref.actor.omni_loss.beta=0.1 \

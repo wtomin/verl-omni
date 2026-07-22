@@ -22,7 +22,6 @@ Offline paired DPO branches on ``model_config.trainer_type`` (``direct_preferenc
 import logging
 import os
 import warnings
-from contextlib import contextmanager
 from typing import Any, Callable, Optional
 
 import torch
@@ -237,21 +236,6 @@ class OmniFSDPEngine(FSDPEngineWithLMHead):
             "loss": [0.0],
             "metrics": {},
         }
-
-    def _model_module(self):
-        return getattr(self.module, "_fsdp_wrapped_module", self.module)
-
-    @contextmanager
-    def disable_adapter(self):
-        module = self._model_module()
-        if not hasattr(module, "disable_adapters"):
-            yield
-            return
-        module.disable_adapters()
-        try:
-            yield
-        finally:
-            module.enable_adapters()
 
     def optimizer_zero_grad(self):
         if self.optimizer is not None:
