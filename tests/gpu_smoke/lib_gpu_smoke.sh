@@ -63,7 +63,7 @@ Usage:
 
 Options:
   -g, --num-gpus N              GPU count to run with (positive integer)
-      --cuda-visible-devices    Comma-separated GPU IDs to expose
+      --cuda-visible-devices DEVICES  Comma-separated GPU IDs to expose
   -h, --help                    Show this help message
 EOF
                 exit 0
