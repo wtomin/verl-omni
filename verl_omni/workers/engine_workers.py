@@ -353,7 +353,7 @@ class TrainingWorker(Worker, DistProfilerExtension):
                     if hasattr(input_ids, "offsets"):
                         global_token_num = input_ids.offsets().diff().tolist()  # (total_nnz,)
                     elif "attention_mask" in mini_batch_td:
-                        global_token_num = mini_batch_td["attention_mask"].sum(dim=-1).tolist()
+                        global_token_num = mini_batch_td["attention_mask"].sum(dim=-1).reshape(-1).tolist()
                     else:
                         raise ValueError(f"input_ids has no offsets or attention_mask: {mini_batch_td}")
                     # allgather from dp rank

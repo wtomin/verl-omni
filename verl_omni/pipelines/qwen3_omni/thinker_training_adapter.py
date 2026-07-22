@@ -326,22 +326,28 @@ class Qwen3OmniThinkerAdapter(OmniModelBase):
         return cls._placeholder_token_ids_cache[cache_key]
 
     @classmethod
-    def _pack_paired_preference_rows(
+    def _flatten_paired_preference_rows(
         cls,
         model_config,
         micro_batch: TensorDict | dict[str, Any],
-    ) -> tuple[dict[str, torch.Tensor], torch.Tensor, torch.Tensor]:
-        """Flatten packed ``[chosen; rejected]`` rows for Qwen3-Omni varlen attention.
+    ) -> tuple[dict[str, torch.Tensor], torch.Tensor]:
+        """Flatten branch-stacked ``[chosen, rejected]`` rows along batch dim.
 
-        The offline DPO dataset stores each preference pair as one row with
-        chosen and rejected concatenated along the sequence dimension. Valid
-        tokens from all rows are flattened into one sequence and the per-token
-        text ``position_ids`` reset to zero at every chosen/rejected boundary.
+        The offline DPO dataset stores each preference pair as one row with a
+        branch dimension of size 2.  Flattening to ``2 * B`` independent rows
+        lets the model use ordinary causal attention masks across FA/SDPA/eager
+        without relying on packed varlen boundaries.
         """
         input_ids = micro_batch["input_ids"].clone()
         attention_mask = micro_batch["attention_mask"]
         labels = micro_batch["labels"]
         position_ids = micro_batch["position_ids"]
+
+        if input_ids.dim() != 3 or input_ids.shape[1] != 2:
+            raise ValueError(
+                "Qwen3OmniThinkerAdapter expects branch-stacked input_ids with shape (B, 2, L) for offline DPO."
+            )
+        batch_size, branch_count, seq_len = input_ids.shape
 
         token_ids = cls._get_placeholder_token_ids(model_config)
         for name, mask_key in (("image", "image_mask"), ("video", "video_mask"), ("audio", "audio_mask")):
@@ -350,52 +356,35 @@ class Qwen3OmniThinkerAdapter(OmniModelBase):
             if mask is not None and token_id is not None:
                 input_ids[mask.bool()] = token_id
 
-        if position_ids.dim() != 3:
-            raise ValueError("Qwen3OmniThinkerAdapter expects packed multimodal position_ids with shape (B, 3, L).")
-        text_position_ids = position_ids[:, 0, :]
+        if position_ids.dim() != 4 or position_ids.shape[:2] != (batch_size, branch_count):
+            raise ValueError(
+                "Qwen3OmniThinkerAdapter expects branch-stacked multimodal position_ids with shape (B, 2, 3, L)."
+            )
 
-        flat_input_ids: list[torch.Tensor] = []
-        flat_labels: list[torch.Tensor] = []
-        flat_positions: list[torch.Tensor] = []
-        segment_ranges: list[list[tuple[int, int]]] = []
-        offset = 0
-        for b in range(input_ids.shape[0]):
-            valid = attention_mask[b].bool()
-            valid_len = int(valid.sum().item())
-            row_text_pos = text_position_ids[b, :valid_len]
-            starts = torch.nonzero(row_text_pos == 0, as_tuple=False).flatten().tolist()
-            if len(starts) != 2:
-                raise ValueError(
-                    "Qwen3OmniThinkerAdapter expects exactly 2 packed sub-sequences (chosen, rejected) "
-                    f"per row, but found {len(starts)} position-id resets. Check the paired-preference dataset."
-                )
-            row_ranges: list[tuple[int, int]] = []
-            for start, end in ((starts[0], starts[1]), (starts[1], valid_len)):
-                row_ranges.append((offset + start, offset + end))
-            segment_ranges.append(row_ranges)
-
-            flat_input_ids.append(input_ids[b, :valid_len])
-            flat_labels.append(labels[b, :valid_len])
-            flat_positions.append(position_ids[b, :, :valid_len])
-            offset += valid_len
-
-        packed_input_ids = torch.cat(flat_input_ids, dim=0).unsqueeze(0)
-        packed_labels = torch.cat(flat_labels, dim=0).unsqueeze(0)
-        # Qwen3-Omni accepts 4-channel position ids: channel 0 is text position
-        # ids used by HF attention to detect packed varlen segments; channels
-        # 1: are the multimodal RoPE ids used by the rotary embedding.
-        packed_mrope_positions = torch.cat(flat_positions, dim=-1).unsqueeze(1)
-        packed_text_positions = packed_mrope_positions[:1]
-        packed_position_ids = torch.cat([packed_text_positions, packed_mrope_positions], dim=0)
-        packed_attention_mask = torch.ones_like(packed_input_ids, dtype=attention_mask.dtype)
-        packed_text = {
-            "input_ids": packed_input_ids,
-            "attention_mask": packed_attention_mask,
-            "position_ids": packed_position_ids,
-            "labels": packed_labels,
+        flat_mrope_positions = position_ids.reshape(batch_size * branch_count, *position_ids.shape[2:])
+        flat_mrope_positions = flat_mrope_positions.transpose(0, 1).contiguous()
+        flat_position_ids = torch.cat([flat_mrope_positions[:1], flat_mrope_positions], dim=0)
+        flat_text = {
+            "input_ids": input_ids.reshape(batch_size * branch_count, seq_len),
+            "attention_mask": attention_mask.reshape(batch_size * branch_count, seq_len),
+            "position_ids": flat_position_ids,
+            "labels": labels.reshape(batch_size * branch_count, seq_len),
         }
-        ranges = torch.tensor(segment_ranges, dtype=torch.long, device=input_ids.device)
-        return packed_text, packed_labels, ranges
+        return flat_text, flat_text["labels"]
+
+    @staticmethod
+    def _flatten_branch_tensors(items: dict[str, Any], batch_size: int, branch_count: int = 2) -> dict[str, Any]:
+        flattened: dict[str, Any] = {}
+        for key, value in items.items():
+            if (
+                isinstance(value, torch.Tensor)
+                and value.ndim >= 2
+                and tuple(value.shape[:2]) == (batch_size, branch_count)
+            ):
+                flattened[key] = value.reshape(batch_size * branch_count, *value.shape[2:])
+            else:
+                flattened[key] = value
+        return flattened
 
     @classmethod
     def prepare_preference_inputs(
@@ -406,48 +395,38 @@ class Qwen3OmniThinkerAdapter(OmniModelBase):
         dtype: torch.dtype | None = None,
     ) -> tuple[dict[str, Any], torch.Tensor, torch.Tensor]:
         """Build Qwen3-Omni thinker forward kwargs for offline paired DPO."""
-        packed_text, labels, segment_ranges = cls._pack_paired_preference_rows(model_config, micro_batch)
+        flat_text, labels = cls._flatten_paired_preference_rows(model_config, micro_batch)
         exclude_keys = cls._MICRO_BATCH_NON_MODEL_KEYS | cls._PREFERENCE_REBUILT_TEXT_KEYS
         branch_items = {key: value for key, value in micro_batch.items() if key not in exclude_keys}
-        branch_items.update(packed_text)
+        pair_batch_size = micro_batch["input_ids"].shape[0]
+        branch_items = cls._flatten_branch_tensors(branch_items, pair_batch_size)
+        branch_items.update(flat_text)
         model_inputs = cls.prepare_model_inputs(model_config, branch_items, dtype=dtype)
-        # Padding removed by packing; omit attention_mask so HF flash attention
-        # infers varlen boundaries from reset text position ids.
-        model_inputs["attention_mask"] = None
-        return model_inputs, labels, segment_ranges
+        return model_inputs, labels, torch.tensor(pair_batch_size, dtype=torch.long, device=labels.device)
 
     @classmethod
     def compute_preference_logps(
         cls,
         logits: torch.Tensor,
         labels: torch.Tensor,
-        segment_ranges: torch.Tensor,
+        pair_batch_size: torch.Tensor,
         *,
         average_log_prob: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Score chosen/rejected segments from packed varlen logits."""
+        """Score branch-stacked chosen/rejected rows from logits."""
         shift_logits = logits[:, :-1, :].float()
         shift_labels = labels[:, 1:].contiguous()
         loss_mask = shift_labels != -100
         safe_labels = shift_labels.masked_fill(~loss_mask, 0)
         token_logps = F.log_softmax(shift_logits, dim=-1).gather(dim=-1, index=safe_labels.unsqueeze(-1)).squeeze(-1)
-        token_logps = token_logps.squeeze(0)
-        loss_mask = loss_mask.squeeze(0)
+        seq_logps = (token_logps * loss_mask).sum(dim=-1)
+        if average_log_prob:
+            seq_logps = seq_logps / loss_mask.sum(dim=-1).clamp(min=1)
 
-        chosen_logps = []
-        rejected_logps = []
-        for row_ranges in segment_ranges.tolist():
-            row_logps = []
-            for start, end in row_ranges:
-                # token_logps[t] scores labels[t + 1], so segment [start, end)
-                # contributes target positions [start + 1, end).
-                stop = max(start, end - 1)
-                seg_logps = token_logps[start:stop]
-                seg_mask = loss_mask[start:stop]
-                seq_logp = (seg_logps * seg_mask).sum()
-                if average_log_prob:
-                    seq_logp = seq_logp / seg_mask.sum().clamp(min=1)
-                row_logps.append(seq_logp)
-            chosen_logps.append(row_logps[0])
-            rejected_logps.append(row_logps[1])
-        return torch.stack(chosen_logps, dim=0), torch.stack(rejected_logps, dim=0)
+        expected_rows = int(pair_batch_size.item()) * 2
+        if seq_logps.shape[0] != expected_rows:
+            raise ValueError(
+                "Qwen3OmniThinkerAdapter expected 2 logits rows per preference pair, "
+                f"got {seq_logps.shape[0]} row(s) for {int(pair_batch_size.item())} pair(s)."
+            )
+        return seq_logps[0::2], seq_logps[1::2]

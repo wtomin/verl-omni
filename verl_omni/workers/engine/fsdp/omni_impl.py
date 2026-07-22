@@ -141,8 +141,8 @@ class OmniFSDPEngine(LoRAAdapterMixin, FSDPEngineWithLMHead):
         batch_size = micro_batch.batch_size[0] if micro_batch.batch_size else omni_inputs["input_ids"].shape[0]
         return super().prepare_model_inputs(TensorDict.from_dict(merged, batch_size=[batch_size]))
 
-    def _concatenated_forward(self, model, micro_batch: TensorDict | dict[str, Any]):
-        model_inputs, labels, segment_ranges = prepare_omni_preference_inputs(
+    def _preference_forward(self, model, micro_batch: TensorDict | dict[str, Any]):
+        model_inputs, labels, pair_batch_size = prepare_omni_preference_inputs(
             self.model_config,
             micro_batch,
             dtype=next(self.module.parameters()).dtype,
@@ -153,7 +153,7 @@ class OmniFSDPEngine(LoRAAdapterMixin, FSDPEngineWithLMHead):
             self.model_config,
             logits,
             labels,
-            segment_ranges,
+            pair_batch_size,
             average_log_prob=tu.get_non_tensor_data(micro_batch, "average_log_prob", default=False),
         )
 
@@ -163,7 +163,7 @@ class OmniFSDPEngine(LoRAAdapterMixin, FSDPEngineWithLMHead):
             micro_batch,
             average_log_prob=tu.get_non_tensor_data(micro_batch, "average_log_prob", default=False),
         )
-        policy_chosen_logps, policy_rejected_logps = self._concatenated_forward(self.module, micro_batch)
+        policy_chosen_logps, policy_rejected_logps = self._preference_forward(self.module, micro_batch)
         model_output = {
             "policy_chosen_logps": policy_chosen_logps,
             "policy_rejected_logps": policy_rejected_logps,
@@ -215,7 +215,7 @@ class OmniFSDPEngine(LoRAAdapterMixin, FSDPEngineWithLMHead):
         with torch.no_grad():
             for micro_batch in micro_batches:
                 micro_batch = micro_batch.to(get_device_id())
-                chosen, rejected = self._concatenated_forward(self.module, micro_batch)
+                chosen, rejected = self._preference_forward(self.module, micro_batch)
                 chosen_logps.append(chosen)
                 rejected_logps.append(rejected)
         return {

@@ -163,14 +163,14 @@ def test_build_preference_branch_extracts_media_and_answer():
     assert branch["conversations"][0][0] == "user"
 
 
-def test_merge_chosen_rejected_concatenates_sequence_tensors():
+def test_merge_chosen_rejected_stacks_branch_tensors():
     chosen = {"input_ids": torch.tensor([1, 2]), "labels": torch.tensor([3, 4])}
-    rejected = {"input_ids": torch.tensor([5, 6]), "labels": torch.tensor([7, 8])}
+    rejected = {"input_ids": torch.tensor([5]), "labels": torch.tensor([7])}
 
     merged = dataset_mod._merge_chosen_rejected(chosen, rejected)
 
-    torch.testing.assert_close(merged["input_ids"], torch.tensor([1, 2, 5, 6]))
-    torch.testing.assert_close(merged["labels"], torch.tensor([3, 4, 7, 8]))
+    torch.testing.assert_close(merged["input_ids"], torch.tensor([[1, 2], [5, 0]]))
+    torch.testing.assert_close(merged["labels"], torch.tensor([[3, 4], [7, -100]]))
 
 
 def test_collate_tensor_values_pads_variable_length_sequences():
@@ -215,6 +215,27 @@ def test_offline_mllm_dpo_collate_fn_batches_same_modality():
     assert batch["labels"].shape == (2, 2)
     assert batch["modality"].tolist() == ["image", "image"]
     assert batch["extra_info"].tolist() == [{"index": 0}, {"index": 1}]
+
+
+def test_offline_mllm_dpo_collate_fn_pads_branch_stacked_pairs():
+    features = [
+        {
+            "modality": "image",
+            "input_ids": torch.tensor([[1, 2], [3, 0]]),
+            "labels": torch.tensor([[-100, 2], [3, -100]]),
+        },
+        {
+            "modality": "image",
+            "input_ids": torch.tensor([[4, 5, 6], [7, 8, 0]]),
+            "labels": torch.tensor([[-100, 5, 6], [7, 8, -100]]),
+        },
+    ]
+    batch = dataset_mod.offline_mllm_dpo_collate_fn(features)
+
+    assert batch["input_ids"].shape == (2, 2, 3)
+    assert batch["labels"].shape == (2, 2, 3)
+    torch.testing.assert_close(batch["input_ids"][0], torch.tensor([[1, 2, 0], [3, 0, 0]]))
+    torch.testing.assert_close(batch["labels"][0], torch.tensor([[-100, 2, -100], [3, -100, -100]]))
 
 
 def test_modality_grouped_batch_sampler_yields_same_modality_chunks():
@@ -285,7 +306,7 @@ def test_offline_mllm_dpo_dataset_getitem(monkeypatch, mock_processor, mixed_par
     )
     item = dataset[0]
 
-    torch.testing.assert_close(item["input_ids"], torch.tensor([1, 2]))
+    torch.testing.assert_close(item["input_ids"], torch.tensor([[1], [2]]))
     torch.testing.assert_close(item["sample_level_scores"], torch.tensor([8.0, 4.0]))
     assert item["modality"] == "image"
     assert item["data_source"] == "omni_preference/image"

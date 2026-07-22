@@ -120,9 +120,33 @@ def _build_preference_branch(sample: dict[str, Any], answer: str) -> dict[str, A
     return branch
 
 
-def _cat_sequence_tensors(chosen: torch.Tensor, rejected: torch.Tensor) -> torch.Tensor:
-    dim = -1 if chosen.ndim > 1 else 0
-    return torch.cat([chosen, rejected], dim=dim)
+def _pad_tensor_to_shape(tensor: torch.Tensor, shape: Sequence[int], pad_value: float | int | bool = 0) -> torch.Tensor:
+    if tuple(tensor.shape) == tuple(shape):
+        return tensor
+    output = torch.full(tuple(shape), pad_value, dtype=tensor.dtype, device=tensor.device)
+    slices = tuple(slice(0, size) for size in tensor.shape)
+    output[slices] = tensor
+    return output
+
+
+def _pad_value_for_key(key: str) -> float | int | bool:
+    if key == "labels":
+        return -100
+    if key == "attention_mask":
+        return 0
+    return 0
+
+
+def _stack_branch_tensors(key: str, chosen: torch.Tensor, rejected: torch.Tensor) -> torch.Tensor:
+    max_shape = tuple(max(chosen.shape[dim], rejected.shape[dim]) for dim in range(chosen.ndim))
+    pad_value = _pad_value_for_key(key)
+    return torch.stack(
+        [
+            _pad_tensor_to_shape(chosen, max_shape, pad_value),
+            _pad_tensor_to_shape(rejected, max_shape, pad_value),
+        ],
+        dim=0,
+    )
 
 
 def _merge_chosen_rejected(chosen: dict[str, Any], rejected: dict[str, Any]) -> dict[str, Any]:
@@ -139,20 +163,8 @@ def _merge_chosen_rejected(chosen: dict[str, Any], rejected: dict[str, Any]) -> 
         if not isinstance(chosen_value, torch.Tensor) or not isinstance(rejected_value, torch.Tensor):
             merged[key] = chosen_value
             continue
-        if key in {"input_ids", "attention_mask", "labels", "position_ids", "image_mask", "video_mask", "audio_mask"}:
-            merged[key] = _cat_sequence_tensors(chosen_value, rejected_value)
-        else:
-            merged[key] = torch.cat([chosen_value, rejected_value], dim=0)
+        merged[key] = _stack_branch_tensors(key, chosen_value, rejected_value)
     return merged
-
-
-def _pad_tensor_to_shape(tensor: torch.Tensor, shape: Sequence[int], pad_value: float | int | bool = 0) -> torch.Tensor:
-    if tuple(tensor.shape) == tuple(shape):
-        return tensor
-    output = torch.full(tuple(shape), pad_value, dtype=tensor.dtype, device=tensor.device)
-    slices = tuple(slice(0, size) for size in tensor.shape)
-    output[slices] = tensor
-    return output
 
 
 def _collate_tensor_values(key: str, values: Sequence[torch.Tensor | None]) -> torch.Tensor:
@@ -161,11 +173,7 @@ def _collate_tensor_values(key: str, values: Sequence[torch.Tensor | None]) -> t
         raise ValueError(f"Cannot collate tensor key {key!r} without any tensor values.")
 
     max_shape = tuple(max(value.shape[dim] for value in present) for dim in range(present[0].ndim))
-    pad_value: float | int | bool = 0
-    if key == "labels":
-        pad_value = -100
-    elif key == "attention_mask":
-        pad_value = 0
+    pad_value = _pad_value_for_key(key)
 
     padded = []
     for value in values:
@@ -450,6 +458,8 @@ def offline_mllm_dpo_collate_fn(features):
         batch[key] = _collate_tensor_values(key, [feature.get(key) for feature in features])
         if key == "position_ids" and batch[key].ndim == 4 and batch[key].shape[2] == 1:
             batch[key] = batch[key].squeeze(2).contiguous()
+        if key == "position_ids" and batch[key].ndim == 5 and batch[key].shape[3] == 1:
+            batch[key] = batch[key].squeeze(3).contiguous()
     for key in sorted(non_tensor_keys):
         batch[key] = np.fromiter((feature.get(key) for feature in features), dtype=object, count=len(features))
     return batch

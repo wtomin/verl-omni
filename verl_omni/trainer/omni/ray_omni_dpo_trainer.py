@@ -17,10 +17,10 @@
 from __future__ import annotations
 
 import logging
+import warnings
 from typing import Optional
 
 from verl.protocol import DataProto
-from verl.trainer.ppo.utils import need_reference_policy
 from verl.utils import tensordict_utils as tu
 from verl.utils.py_functional import rename_dict
 
@@ -53,7 +53,7 @@ class OmniDirectPreferenceRayTrainer(DirectPreferenceRayTrainer):
         loss_mode = config.actor_rollout_ref.actor.omni_loss.loss_mode
         if loss_mode != "dpo":
             raise NotImplementedError("OmniDirectPreferenceRayTrainer currently supports omni_loss.loss_mode=dpo only.")
-        self.use_reference_policy = need_reference_policy(self.config) or (loss_mode == "dpo")
+        self.use_reference_policy = True
         self._has_old_adapter = "old" in tuple(
             config.actor_rollout_ref.model.get("policy_state_adapters", ("default",))
         )
@@ -97,10 +97,12 @@ class OmniDirectPreferenceRayTrainer(DirectPreferenceRayTrainer):
         seed = self.config.actor_rollout_ref.actor.data_loader_seed
         shuffle = self.config.actor_rollout_ref.actor.shuffle
         if self.config.algorithm.get("paired_preference", False) and shuffle:
-            sys_logger.warning(
+            message = (
                 "Shuffle is not supported for omni direct preference because chosen/rejected "
-                "branches are packed together. Setting shuffle to False."
+                "branches must stay grouped by preference pair. Setting shuffle to False."
             )
+            sys_logger.warning(message)
+            warnings.warn(message, UserWarning, stacklevel=2)
             shuffle = False
 
         tu.assign_non_tensor(
@@ -113,7 +115,10 @@ class OmniDirectPreferenceRayTrainer(DirectPreferenceRayTrainer):
         )
 
         actor_output = self.actor_rollout_wg.update_actor(batch_td)
-        actor_output = tu.get(actor_output, "metrics")
+        if "metrics" in actor_output and hasattr(actor_output["metrics"], "to_dict"):
+            actor_output = actor_output["metrics"].to_dict()
+        else:
+            actor_output = tu.get(actor_output, "metrics")
         actor_output = rename_dict(actor_output, "actor/")
         if (actor_mfu := actor_output.pop("actor/mfu", None)) is not None:
             actor_output["perf/mfu/actor"] = actor_mfu
