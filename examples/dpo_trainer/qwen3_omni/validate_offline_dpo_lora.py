@@ -353,6 +353,101 @@ def score_preference_batch(
     )
 
 
+def load_lora_adapter_weights(model, adapter_path: str, adapter_name: str = "default") -> None:
+    """Load LoRA weights without wrapping the model in ``PeftModel``."""
+    load_lora_adapter = getattr(model, "load_lora_adapter", None)
+    if callable(load_lora_adapter):
+        load_lora_adapter(adapter_path, adapter_name=adapter_name)
+        return
+
+    from peft import LoraConfig, get_peft_model_state_dict, inject_adapter_in_model
+    from safetensors.torch import load_file as safetensors_load_file
+
+    adapter_config_path = os.path.join(adapter_path, "adapter_config.json")
+    adapter_weights_path = os.path.join(adapter_path, "adapter_model.safetensors")
+
+    if not os.path.isfile(adapter_config_path):
+        raise FileNotFoundError(f"LoRA adapter config not found at {adapter_config_path}")
+    if not os.path.isfile(adapter_weights_path):
+        raise FileNotFoundError(f"LoRA adapter weights not found at {adapter_weights_path}")
+
+    if hasattr(LoraConfig, "from_dict"):
+        with open(adapter_config_path) as f:
+            lora_config = LoraConfig.from_dict(json.load(f))
+    else:
+        lora_config = LoraConfig.from_pretrained(adapter_path)
+
+    inject_adapter_in_model(lora_config, model, adapter_name=adapter_name)
+    adapter_state_dict = safetensors_load_file(adapter_weights_path)
+    current_state = get_peft_model_state_dict(model, adapter_name=adapter_name)
+
+    adapter_state_by_key = dict(adapter_state_dict)
+    for key, tensor in adapter_state_dict.items():
+        if key.startswith("base_model.model."):
+            adapter_state_by_key.setdefault(key.removeprefix("base_model.model."), tensor)
+
+    loadable_keys = {
+        key
+        for key, tensor in current_state.items()
+        if key in adapter_state_by_key and tensor.shape == adapter_state_by_key[key].shape
+    }
+    missing_load = set(current_state) - loadable_keys
+    unexpected_load = set(adapter_state_dict) - {
+        key if key in adapter_state_dict else f"base_model.model.{key}" for key in loadable_keys
+    }
+    if not loadable_keys:
+        raise RuntimeError(
+            "No matching LoRA keys found between adapter checkpoint and injected model. "
+            f"Missing={len(missing_load)}, unexpected={len(unexpected_load)}."
+        )
+
+    if missing_load:
+        logger.warning(
+            "LoRA adapter %r: %d keys in model but not in checkpoint. They will keep their initial values.",
+            adapter_name,
+            len(missing_load),
+        )
+    if unexpected_load:
+        logger.warning(
+            "LoRA adapter %r: %d keys in checkpoint but not in model. They will be ignored.",
+            adapter_name,
+            len(unexpected_load),
+        )
+
+    with torch.no_grad():
+        for key in loadable_keys:
+            current_state[key].copy_(adapter_state_by_key[key])
+
+
+def set_lora_adapter(model, adapter_name: str = "default") -> None:
+    """Activate an adapter for both wrapped PEFT models and manually injected modules."""
+    set_adapter = getattr(model, "set_adapter", None)
+    if callable(set_adapter):
+        try:
+            set_adapter(adapter_name)
+            return
+        except ValueError as exc:
+            if "No adapter loaded" not in str(exc):
+                raise
+
+    activated = 0
+    for module in model.modules():
+        if module is model:
+            continue
+        module_set_adapter = getattr(module, "set_adapter", None)
+        if callable(module_set_adapter):
+            try:
+                module_set_adapter(adapter_name)
+            except ValueError as exc:
+                if "No adapter loaded" not in str(exc):
+                    raise
+                continue
+            activated += 1
+
+    if activated == 0:
+        logger.warning("LoRA adapter %r: no set_adapter hooks found after injection.", adapter_name)
+
+
 def load_qwen3_omni_lora_model(args: argparse.Namespace):
     from transformers import AutoConfig, AutoModelForMultimodalLM
     from verl.utils.import_utils import import_external_libs
@@ -411,15 +506,9 @@ def load_qwen3_omni_lora_model(args: argparse.Namespace):
     maybe_unfuse_qwen3_omni_experts(model, args.external_lib)
 
     logger.info("Loading LoRA adapter weights from %s", adapter_path)
-    if hasattr(model, "load_lora_adapter"):
-        model.load_lora_adapter(adapter_path)
-    else:
-        from peft import PeftModel
+    load_lora_adapter_weights(model, adapter_path)
 
-        model = PeftModel.from_pretrained(model, adapter_path)
-
-    if hasattr(model, "set_adapter"):
-        model.set_adapter("default")
+    set_lora_adapter(model, "default")
     if args.device_map is None:
         logger.info("Moving model to %s and switching to eval mode", args.device)
         model.to(args.device)
