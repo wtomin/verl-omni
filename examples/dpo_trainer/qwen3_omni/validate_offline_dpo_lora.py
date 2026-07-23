@@ -37,12 +37,14 @@ Example:
 from __future__ import annotations
 
 import argparse
+import importlib
 import json
 import logging
 import os
 import sys
 import time
 from collections import defaultdict
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -62,6 +64,22 @@ from verl_omni.utils.dataset.offline_mllm_dpo_dataset import (  # noqa: E402
 )
 
 logger = logging.getLogger("qwen3_omni_dpo_validation")
+
+DEFAULT_EXTERNAL_LIB = "verl_omni.models.transformers.qwen3_omni_thinker_experts"
+DEFAULT_MM_CONFIGS = {
+    "scale_factor": 28,
+    "image_min_pixels": 3136,
+    "image_max_pixels": 12845056,
+    "video_min_pixels": 3136,
+    "video_max_pixels": 602112,
+    "max_ratio": 200,
+    "min_frames": 2,
+    "max_frames": 4,
+    "frame_factor": 1,
+    "sample_rate": 16000,
+    "fps": 2.0,
+    "use_audio_in_video": False,
+}
 
 
 @dataclass
@@ -117,6 +135,13 @@ class RunningStats:
         }
 
 
+@dataclass
+class PreferenceScores:
+    chosen_logps: torch.Tensor
+    rejected_logps: torch.Tensor
+    label_token_counts: torch.Tensor
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model-path", required=True, help="Base Qwen3-Omni model path or HF repo id.")
@@ -155,7 +180,14 @@ def parse_args() -> argparse.Namespace:
         help="Optional HF attention implementation override, e.g. flash_attention_2 or sdpa.",
     )
     parser.add_argument("--trust-remote-code", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--external-lib", default=None, help="Optional external lib that registers the omni adapter.")
+    parser.add_argument(
+        "--external-lib",
+        default=DEFAULT_EXTERNAL_LIB,
+        help=(
+            "Optional external lib that registers the omni adapter. Defaults to the Qwen3-Omni expert unfuse "
+            "module used by the training script."
+        ),
+    )
     parser.add_argument(
         "--average-log-prob",
         action="store_true",
@@ -169,7 +201,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--mm-configs",
         default=None,
-        help='JSON string for multimodal transform kwargs, e.g. \'{"fps": 2.0, "max_frames": 16}\'.',
+        help=(
+            "JSON string for multimodal transform kwargs. If omitted, validation uses the same Qwen3-Omni "
+            "defaults as the LoRA DPO training script; pass '{}' to intentionally use processor defaults."
+        ),
+    )
+    parser.add_argument(
+        "--skip-reference",
+        action="store_true",
+        help="Skip base/reference log-probs and report only raw policy chosen-vs-rejected accuracy.",
     )
     parser.add_argument(
         "--log-level",
@@ -240,6 +280,79 @@ def resolve_adapter_path(adapter_path: str, base_model_name_or_path: str | None 
     )
 
 
+def iter_external_libs(external_lib: str | None) -> list[str]:
+    if not external_lib:
+        return []
+    return [module.strip() for module in external_lib.split(",") if module.strip()]
+
+
+def maybe_unfuse_qwen3_omni_experts(model, external_lib: str | None) -> None:
+    """Mirror the training-time Qwen3-Omni expert structure before loading LoRA."""
+    for module_name in iter_external_libs(external_lib):
+        module = importlib.import_module(module_name)
+        unfuse_fn = getattr(module, "unfuse_qwen3_omni_thinker_experts", None)
+        if callable(unfuse_fn):
+            converted = unfuse_fn(model)
+            logger.info("External lib %s unfused %d thinker expert module(s)", module_name, converted)
+
+
+@contextmanager
+def adapters_disabled(model):
+    """Temporarily disable PEFT adapters for ref-in-actor style validation."""
+    disable_adapters = getattr(model, "disable_adapters", None)
+    enable_adapters = getattr(model, "enable_adapters", None)
+    if callable(disable_adapters) and callable(enable_adapters):
+        disable_adapters()
+        try:
+            yield
+        finally:
+            enable_adapters()
+        return
+
+    disable_adapter = getattr(model, "disable_adapter", None)
+    if callable(disable_adapter):
+        maybe_context = disable_adapter()
+        if hasattr(maybe_context, "__enter__") and hasattr(maybe_context, "__exit__"):
+            with maybe_context:
+                yield
+            return
+
+    raise RuntimeError(
+        "The loaded model does not expose disable_adapter() or disable_adapters(); "
+        "run with --skip-reference if you only need raw policy margin."
+    )
+
+
+def score_preference_batch(
+    *,
+    model,
+    model_config,
+    model_batch: dict[str, Any],
+    input_device: torch.device,
+    average_log_prob: bool,
+) -> PreferenceScores:
+    model_inputs, labels, segment_ranges = prepare_omni_preference_inputs(
+        model_config,
+        model_batch,
+        dtype=next(model.parameters()).dtype,
+    )
+    outputs = model(**model_inputs, use_cache=False)
+    logits = outputs.logits if hasattr(outputs, "logits") else outputs[0]
+    chosen_logps, rejected_logps = compute_omni_preference_logps(
+        model_config,
+        logits,
+        labels,
+        segment_ranges,
+        average_log_prob=average_log_prob,
+    )
+    label_token_counts = (labels != -100).sum(dim=-1).detach().to(input_device)
+    return PreferenceScores(
+        chosen_logps=chosen_logps,
+        rejected_logps=rejected_logps,
+        label_token_counts=label_token_counts,
+    )
+
+
 def load_qwen3_omni_lora_model(args: argparse.Namespace):
     from transformers import AutoConfig, AutoModelForMultimodalLM
     from verl.utils.import_utils import import_external_libs
@@ -295,6 +408,7 @@ def load_qwen3_omni_lora_model(args: argparse.Namespace):
     model = AutoModelForMultimodalLM.from_pretrained(args.model_path, **model_kwargs)
     adapter_cls = OmniModelBase.get_class(model_config)
     model = adapter_cls.configure_model(model, model_config)
+    maybe_unfuse_qwen3_omni_experts(model, args.external_lib)
 
     logger.info("Loading LoRA adapter weights from %s", adapter_path)
     if hasattr(model, "load_lora_adapter"):
@@ -318,10 +432,9 @@ def load_qwen3_omni_lora_model(args: argparse.Namespace):
 
 
 def build_dataset(args: argparse.Namespace, processor) -> OfflineMLLMDPODataset:
-    mm_configs = json.loads(args.mm_configs) if args.mm_configs else {}
+    mm_configs = json.loads(args.mm_configs) if args.mm_configs is not None else dict(DEFAULT_MM_CONFIGS)
     logger.info("Building held-out dataset from %s", args.data_files)
-    if mm_configs:
-        logger.info("Using multimodal transform configs: %s", mm_configs)
+    logger.info("Using multimodal transform configs: %s", mm_configs)
     data_config = OmegaConf.create(
         {
             "prompt_key": args.prompt_key,
@@ -424,8 +537,10 @@ def main() -> None:
             output_path.unlink()
         logger.info("Per-sample results will be written to %s", output_path)
 
-    stats = RunningStats()
-    stats_by_modality: dict[str, RunningStats] = defaultdict(RunningStats)
+    raw_stats = RunningStats()
+    raw_stats_by_modality: dict[str, RunningStats] = defaultdict(RunningStats)
+    dpo_stats = RunningStats()
+    dpo_stats_by_modality: dict[str, RunningStats] = defaultdict(RunningStats)
     batch_count = 0
     current_modality = None
     logger.info("Loaded adapter: %s", adapter_path)
@@ -443,63 +558,106 @@ def main() -> None:
             batch = offline_mllm_dpo_collate_fn(features)
             model_batch = tensor_batch_only(batch, input_device, args.average_log_prob)
             logger.debug("Building preference model inputs for batch %d/%d", batch_count + 1, total_batches)
-            model_inputs, labels, segment_ranges = prepare_omni_preference_inputs(
-                model_config,
-                model_batch,
-                dtype=next(model.parameters()).dtype,
-            )
-            logger.debug("Running forward pass for batch %d/%d", batch_count + 1, total_batches)
-            outputs = model(**model_inputs, use_cache=False)
-            logits = outputs.logits if hasattr(outputs, "logits") else outputs[0]
-            chosen_logps, rejected_logps = compute_omni_preference_logps(
-                model_config,
-                logits,
-                labels,
-                segment_ranges,
+            policy_scores = score_preference_batch(
+                model=model,
+                model_config=model_config,
+                model_batch=model_batch,
+                input_device=input_device,
                 average_log_prob=args.average_log_prob,
             )
+            reference_scores = None
+            if not args.skip_reference:
+                with adapters_disabled(model):
+                    reference_scores = score_preference_batch(
+                        model=model,
+                        model_config=model_config,
+                        model_batch=model_batch,
+                        input_device=input_device,
+                        average_log_prob=args.average_log_prob,
+                    )
 
             result_rows = []
             for offset, index in enumerate(indices):
-                chosen = float(chosen_logps[offset].detach().cpu())
-                rejected = float(rejected_logps[offset].detach().cpu())
-                margin = chosen - rejected
-                stats.update(margin)
-                stats_by_modality[modality].update(margin)
-                result_rows.append(
-                    {
-                        "index": int(index),
-                        "uid": safe_json_value(batch.get("uid", [None])[offset]),
-                        "modality": modality,
-                        "chosen_logp": chosen,
-                        "rejected_logp": rejected,
-                        "margin": margin,
-                        "correct": margin > 0,
-                    }
-                )
+                chosen = float(policy_scores.chosen_logps[offset].detach().cpu())
+                rejected = float(policy_scores.rejected_logps[offset].detach().cpu())
+                raw_margin = chosen - rejected
+                raw_stats.update(raw_margin)
+                raw_stats_by_modality[modality].update(raw_margin)
+                row = {
+                    "index": int(index),
+                    "uid": safe_json_value(batch.get("uid", [None])[offset]),
+                    "modality": modality,
+                    "policy_chosen_logp": chosen,
+                    "policy_rejected_logp": rejected,
+                    "raw_policy_margin": raw_margin,
+                    "raw_policy_correct": raw_margin > 0,
+                    "chosen_label_tokens": int(policy_scores.label_token_counts[offset * 2].detach().cpu()),
+                    "rejected_label_tokens": int(policy_scores.label_token_counts[offset * 2 + 1].detach().cpu()),
+                }
+                if reference_scores is not None:
+                    ref_chosen = float(reference_scores.chosen_logps[offset].detach().cpu())
+                    ref_rejected = float(reference_scores.rejected_logps[offset].detach().cpu())
+                    chosen_reward = chosen - ref_chosen
+                    rejected_reward = rejected - ref_rejected
+                    dpo_margin = chosen_reward - rejected_reward
+                    dpo_stats.update(dpo_margin)
+                    dpo_stats_by_modality[modality].update(dpo_margin)
+                    row.update(
+                        {
+                            "reference_chosen_logp": ref_chosen,
+                            "reference_rejected_logp": ref_rejected,
+                            "chosen_reward": chosen_reward,
+                            "rejected_reward": rejected_reward,
+                            "dpo_margin": dpo_margin,
+                            "dpo_correct": dpo_margin > 0,
+                        }
+                    )
+                result_rows.append(row)
             write_results(args.output_jsonl, result_rows)
 
             batch_count += 1
             if args.log_every > 0 and batch_count % args.log_every == 0:
                 elapsed = time.perf_counter() - started_at
                 logger.info(
-                    "Progress: batches=%d/%d samples=%d/%d accuracy=%.4f mean_margin=%.4f elapsed=%.1fs",
+                    "Progress: batches=%d/%d samples=%d/%d raw_accuracy=%.4f raw_margin=%.4f "
+                    "dpo_accuracy=%.4f dpo_margin=%.4f elapsed=%.1fs",
                     batch_count,
                     total_batches,
-                    stats.total,
+                    raw_stats.total,
                     len(dataset),
-                    stats.accuracy,
-                    stats.mean_margin,
+                    raw_stats.accuracy,
+                    raw_stats.mean_margin,
+                    dpo_stats.accuracy,
+                    dpo_stats.mean_margin,
                     elapsed,
                 )
 
     summary = {
-        "overall": stats.to_dict(),
-        "by_modality": {modality: modality_stats.to_dict() for modality, modality_stats in stats_by_modality.items()},
+        "raw_policy": {
+            "overall": raw_stats.to_dict(),
+            "by_modality": {
+                modality: modality_stats.to_dict() for modality, modality_stats in raw_stats_by_modality.items()
+            },
+        },
+        "dpo_reward": None
+        if args.skip_reference
+        else {
+            "overall": dpo_stats.to_dict(),
+            "by_modality": {
+                modality: modality_stats.to_dict() for modality, modality_stats in dpo_stats_by_modality.items()
+            },
+        },
         "average_log_prob": args.average_log_prob,
+        "skip_reference": args.skip_reference,
     }
     logger.info("Validation finished in %.1fs", time.perf_counter() - started_at)
-    logger.info("Final accuracy=%.4f mean_margin=%.4f", stats.accuracy, stats.mean_margin)
+    logger.info(
+        "Final raw_accuracy=%.4f raw_margin=%.4f dpo_accuracy=%.4f dpo_margin=%.4f",
+        raw_stats.accuracy,
+        raw_stats.mean_margin,
+        dpo_stats.accuracy,
+        dpo_stats.mean_margin,
+    )
     print(json.dumps(summary, indent=2, ensure_ascii=False))
 
 

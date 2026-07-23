@@ -136,9 +136,11 @@ def _merge_fsdp_lora_tensors(rank_paths: list[Path]) -> tuple[OrderedDict[str, t
             merged = lora_shards[key][0].contiguous()
 
         module_key = key.rsplit(".lora_", maxsplit=1)[0]
+        target_parts = [part for part in module_key.split(".") if part != "base_layer"]
+        target_module = target_parts[-1]
         peft_key = "base_model.model." + key.replace(".default.weight", ".weight")
         lora_params[peft_key] = merged
-        target_modules.add(module_key)
+        target_modules.add(target_module)
 
     return lora_params, sorted(target_modules)
 

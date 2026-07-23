@@ -20,9 +20,85 @@ it does not patch tokenizer or processor loading.
 
 import logging
 
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
 logger = logging.getLogger(__name__)
 
 _EXPERTS_UNFUSE_APPLIED = False
+
+
+class _Expert(nn.Module):
+    def __init__(self, hidden: int, intermediate: int) -> None:
+        super().__init__()
+        self.gate_proj = nn.Linear(hidden, intermediate, bias=False)
+        self.up_proj = nn.Linear(hidden, intermediate, bias=False)
+        self.down_proj = nn.Linear(intermediate, hidden, bias=False)
+
+
+class _Qwen3OmniMoeThinkerTextExpertsUnfused(nn.Module):
+    """Per-expert nn.Linear replacement for the tf5 fused Qwen3OmniMoeThinkerTextExperts."""
+
+    def __init__(self, n: int, hidden: int, intermediate: int, act_fn) -> None:
+        super().__init__()
+        self.num_experts = n
+        self.act_fn = act_fn
+        self.experts = nn.ModuleList([_Expert(hidden, intermediate) for _ in range(n)])
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        top_k_index: torch.Tensor,
+        top_k_weights: torch.Tensor,
+    ) -> torch.Tensor:
+        final = torch.zeros_like(hidden_states)
+        with torch.no_grad():
+            mask = F.one_hot(top_k_index, self.num_experts).permute(2, 1, 0)
+            hits = mask.sum(dim=(-1, -2)).gt(0).nonzero()
+        for row in hits:
+            i = row[0].item()
+            if i >= self.num_experts:
+                continue
+            top_k_pos, tok_idx = torch.where(mask[i])
+            x = hidden_states[tok_idx]
+            e = self.experts[i]
+            out = e.down_proj(self.act_fn(e.gate_proj(x)) * e.up_proj(x))
+            out = out * top_k_weights[tok_idx, top_k_pos, None]
+            final.index_add_(0, tok_idx, out.to(final.dtype))
+        return final
+
+
+def unfuse_qwen3_omni_thinker_experts(model) -> int:
+    """Replace fused Qwen3-Omni thinker experts with per-expert Linear modules.
+
+    This is intentionally callable outside ``get_peft_model`` so adapter reload
+    paths can build the same module structure used during training.
+    """
+    converted = 0
+    for path, module in list(model.named_modules()):
+        if type(module).__name__ != "Qwen3OmniMoeThinkerTextExperts":
+            continue
+        gate_up = module.gate_up_proj.data  # (n, 2*intermediate, hidden)
+        down = module.down_proj.data  # (n, hidden, intermediate)
+        n = gate_up.shape[0]
+        di = gate_up.shape[1] // 2
+        h = gate_up.shape[2]
+
+        new_mod = _Qwen3OmniMoeThinkerTextExpertsUnfused(n, h, di, module.act_fn)
+        for i, e in enumerate(new_mod.experts):
+            e.gate_proj.weight = nn.Parameter(gate_up[i, :di, :].clone())
+            e.up_proj.weight = nn.Parameter(gate_up[i, di:, :].clone())
+            e.down_proj.weight = nn.Parameter(down[i].clone())
+
+        parent_path, _, child_name = path.rpartition(".")
+        parent = model.get_submodule(parent_path) if parent_path else model
+        setattr(parent, child_name, new_mod)
+        converted += 1
+
+    if converted:
+        logger.info("verl_omni: unfused %d Qwen3-Omni thinker expert module(s)", converted)
+    return converted
 
 
 def _patch_unfuse_qwen3_omni_thinker_experts() -> None:
@@ -40,72 +116,6 @@ def _patch_unfuse_qwen3_omni_thinker_experts() -> None:
         import peft as _peft
     except ImportError:
         return
-
-    import torch
-    import torch.nn as nn
-    import torch.nn.functional as F
-
-    class _Expert(nn.Module):
-        def __init__(self, hidden: int, intermediate: int) -> None:
-            super().__init__()
-            self.gate_proj = nn.Linear(hidden, intermediate, bias=False)
-            self.up_proj = nn.Linear(hidden, intermediate, bias=False)
-            self.down_proj = nn.Linear(intermediate, hidden, bias=False)
-
-    class _Qwen3OmniMoeThinkerTextExpertsUnfused(nn.Module):
-        """Per-expert nn.Linear replacement for the tf5 fused Qwen3OmniMoeThinkerTextExperts.
-
-        Weights are cloned from fused params at conversion time so the original can be GC'd.
-        """
-
-        def __init__(self, n: int, hidden: int, intermediate: int, act_fn) -> None:
-            super().__init__()
-            self.num_experts = n
-            self.act_fn = act_fn
-            self.experts = nn.ModuleList([_Expert(hidden, intermediate) for _ in range(n)])
-
-        def forward(
-            self,
-            hidden_states: torch.Tensor,
-            top_k_index: torch.Tensor,
-            top_k_weights: torch.Tensor,
-        ) -> torch.Tensor:
-            final = torch.zeros_like(hidden_states)
-            with torch.no_grad():
-                mask = F.one_hot(top_k_index, self.num_experts).permute(2, 1, 0)
-                hits = mask.sum(dim=(-1, -2)).gt(0).nonzero()
-            for row in hits:
-                i = row[0].item()
-                if i >= self.num_experts:
-                    continue
-                top_k_pos, tok_idx = torch.where(mask[i])
-                x = hidden_states[tok_idx]
-                e = self.experts[i]
-                out = e.down_proj(self.act_fn(e.gate_proj(x)) * e.up_proj(x))
-                out = out * top_k_weights[tok_idx, top_k_pos, None]
-                final.index_add_(0, tok_idx, out.to(final.dtype))
-            return final
-
-    def _convert_model_experts(model) -> None:
-        """Replace all fused Thinker expert modules with unfused per-expert nn.Linear."""
-        for path, module in list(model.named_modules()):
-            if type(module).__name__ != "Qwen3OmniMoeThinkerTextExperts":
-                continue
-            gate_up = module.gate_up_proj.data  # (n, 2*intermediate, hidden)
-            down = module.down_proj.data  # (n, hidden, intermediate)
-            n = gate_up.shape[0]
-            di = gate_up.shape[1] // 2
-            h = gate_up.shape[2]
-
-            new_mod = _Qwen3OmniMoeThinkerTextExpertsUnfused(n, h, di, module.act_fn)
-            for i, e in enumerate(new_mod.experts):
-                e.gate_proj.weight = nn.Parameter(gate_up[i, :di, :].clone())
-                e.up_proj.weight = nn.Parameter(gate_up[i, di:, :].clone())
-                e.down_proj.weight = nn.Parameter(down[i].clone())
-
-            parent_path, _, child_name = path.rpartition(".")
-            parent = model.get_submodule(parent_path) if parent_path else model
-            setattr(parent, child_name, new_mod)
 
     _orig_get_peft_model = _peft.get_peft_model
 
@@ -133,7 +143,7 @@ def _patch_unfuse_qwen3_omni_thinker_experts() -> None:
 
     def _patched_get_peft_model(model, peft_config, **kwargs):
         if type(model).__name__ == "Qwen3OmniMoeForConditionalGeneration":
-            _convert_model_experts(model)
+            unfuse_qwen3_omni_thinker_experts(model)
             # verl passes target_modules as a comma-separated string; PEFT treats it as regex, so split to a set.
             if isinstance(peft_config.target_modules, str) and "," in peft_config.target_modules:
                 peft_config.target_modules = set(peft_config.target_modules.split(","))
