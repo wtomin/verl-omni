@@ -85,7 +85,8 @@ def _load_json(path: Path) -> dict:
 
 
 def _to_peft_lora_key(key: str) -> str:
-    peft_key = key.replace(".default.weight", ".weight")
+    """Normalize an FSDP LoRA tensor name to PEFT ``adapter_model.safetensors`` format."""
+    peft_key = key.replace("_fsdp_wrapped_module.", "").replace(".default.weight", ".weight")
     if peft_key.startswith("base_model.model."):
         return peft_key
     return f"base_model.model.{peft_key}"

@@ -6,7 +6,10 @@
 #   dummy Omni-Preference parquet (image/video/audio) ->
 #   OfflineMLLMDPODataset + ModalityGroupedBatchSampler ->
 #   OmniDirectPreferenceRayTrainer (actor-only, offline) ->
-#   FSDP LoRA actor update with ref-in-actor (base weights as reference).
+#   FSDP LoRA actor update with ref-in-actor (base weights as reference) ->
+#   save actor checkpoint ->
+#   export LoRA adapter + validate on toy held-out parquet via
+#   examples/dpo_trainer/qwen3_omni/validate_offline_dpo_lora.py.
 #
 # This is a plumbing smoke test (random weights, 1–2 steps): it checks the
 # pipeline runs without errors, NOT model quality.
@@ -49,6 +52,11 @@ AUDIO_RATIO=${AUDIO_RATIO:-1.0}
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 export PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
+
+PROJECT_NAME=verl-test
+EXPERIMENT_NAME=qwen3-omni-multimodal-offline-mllm-dpo-lora-smoke
+CHECKPOINT_DIR="${REPO_ROOT}/checkpoints/${PROJECT_NAME}/${EXPERIMENT_NAME}"
+ADAPTER_PATH="${CHECKPOINT_DIR}/global_step_${TOTAL_TRAINING_STEPS}/actor"
 
 # Thinker-only LoRA: strip talker / code2wav / vision tower / audio tower.
 EXCLUDE_MODULES=".*talker.*|.*code2wav.*|.*code_predictor.*|.*visual.*|.*audio_tower.*"
@@ -130,15 +138,36 @@ python3 -m verl_omni.trainer.main_omni \
     actor_rollout_ref.actor.shuffle=false \
     trainer.resume_mode=disable \
     trainer.logger='["console"]' \
-    trainer.project_name=verl-test \
-    trainer.experiment_name=qwen3-omni-multimodal-offline-mllm-dpo-lora-smoke \
+    trainer.project_name="${PROJECT_NAME}" \
+    trainer.experiment_name="${EXPERIMENT_NAME}" \
+    trainer.default_local_dir="${CHECKPOINT_DIR}" \
     trainer.val_before_train=false \
     trainer.test_freq=-1 \
-    trainer.save_freq=-1 \
+    trainer.save_freq=1 \
     trainer.n_gpus_per_node="${NUM_GPUS}" \
     trainer.nnodes=1 \
     trainer.total_epochs=1 \
     trainer.total_training_steps="${TOTAL_TRAINING_STEPS}" \
     "$@"
 
-echo "Qwen3-Omni multimodal offline MLLM DPO + LoRA smoke test passed."
+if [ ! -f "${ADAPTER_PATH}/fsdp_config.json" ] || [ ! -f "${ADAPTER_PATH}/lora_train_meta.json" ]; then
+    echo "Expected FSDP LoRA actor checkpoint not found at ${ADAPTER_PATH}" >&2
+    exit 1
+fi
+
+echo "Running post-training LoRA validation on toy held-out parquet via validate_offline_dpo_lora.py"
+python3 "${REPO_ROOT}/examples/dpo_trainer/qwen3_omni/validate_offline_dpo_lora.py" \
+    --model-path "${MODEL_PATH}" \
+    --adapter-path "${ADAPTER_PATH}" \
+    --data-files \
+        "${DATA_DIR}/image/test.parquet" \
+        "${DATA_DIR}/video/test.parquet" \
+        "${DATA_DIR}/audio/test.parquet" \
+    --batch-size 1 \
+    --dtype bfloat16 \
+    --attn-implementation "${ATTN_IMPLEMENTATION}" \
+    --external-lib "${QWEN3_OMNI_EXTERNAL_LIB}" \
+    --skip-reference \
+    --log-level INFO
+
+echo "Qwen3-Omni multimodal offline MLLM DPO + LoRA smoke test passed (train + validate)."
