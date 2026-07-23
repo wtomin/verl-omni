@@ -32,12 +32,12 @@ PPO_MINI_BATCH_SIZE=${PPO_MINI_BATCH_SIZE:-${TRAIN_BATCH_SIZE}}
 PPO_MICRO_BATCH_SIZE_PER_GPU=${PPO_MICRO_BATCH_SIZE_PER_GPU:-1}
 
 LORA_RANK=${LORA_RANK:-64}
-LORA_ALPHA=${LORA_ALPHA:-32}
+LORA_ALPHA=${LORA_ALPHA:-128}
 # The external lib unfuses Qwen3-Omni MoE experts before PEFT attaches LoRA, so expert LoRA
 # should target the unfused nn.Linear names instead of PEFT target_parameters on fused tensors.
 LORA_TARGET_MODULES=${LORA_TARGET_MODULES:-'["q_proj","k_proj","v_proj","o_proj","gate_proj","up_proj","down_proj"]'}
 ATTN_IMPLEMENTATION=${ATTN_IMPLEMENTATION:-flash_attention_2}
-LR=${LR:-1.0e-6}
+LR=${LR:-1.0e-4}
 SAVE_FREQ=${SAVE_FREQ:-50}
 TEST_FREQ=${TEST_FREQ:--1}
 
@@ -95,7 +95,7 @@ python3 -m verl_omni.trainer.main_omni \
     actor_rollout_ref.actor.trainer_type=direct_preference \
     actor_rollout_ref.actor.omni_loss.loss_mode=dpo \
     actor_rollout_ref.actor.omni_loss.beta=0.1 \
-    actor_rollout_ref.actor.omni_loss.label_smoothing=0.0 \
+    actor_rollout_ref.actor.omni_loss.label_smoothing=0.1 \
     actor_rollout_ref.actor.omni_loss.loss_type=sigmoid \
     actor_rollout_ref.actor.omni_loss.average_log_prob=false \
     actor_rollout_ref.actor.omni_loss.refer_model_precision=bfloat16 \
@@ -114,8 +114,8 @@ python3 -m verl_omni.trainer.main_omni \
     trainer.resume_mode=disable \
     trainer.logger='["console","wandb"]' \
     trainer.project_name=omni-preference-dpo \
-    trainer.experiment_name=qwen3-omni-offline-dpo-lora-100steps \
-    trainer.default_local_dir="checkpoints/omni-preference-dpo/qwen3-omni-offline-dpo-lora-100steps" \
+    trainer.experiment_name=qwen3-omni-offline-dpo-lora \
+    trainer.default_local_dir="checkpoints/omni-preference-dpo/qwen3-omni-offline-dpo-lora" \
     trainer.val_before_train=false \
     trainer.test_freq="${TEST_FREQ}" \
     trainer.save_freq="${SAVE_FREQ}" \
