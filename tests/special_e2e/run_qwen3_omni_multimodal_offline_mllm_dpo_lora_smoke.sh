@@ -42,7 +42,7 @@ LORA_ALPHA=${LORA_ALPHA:-16}
 # so target the resulting nn.Linear modules instead of fused target_parameters.
 LORA_TARGET_MODULES=${LORA_TARGET_MODULES:-'["q_proj","k_proj","v_proj","o_proj","gate_proj","up_proj","down_proj"]'}
 TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE:-2}
-ATTN_IMPLEMENTATION=${ATTN_IMPLEMENTATION:-flash_attention_2}
+ATTN_IMPLEMENTATION=${ATTN_IMPLEMENTATION:-sdpa}
 IMAGE_RATIO=${IMAGE_RATIO:-1.0}
 VIDEO_RATIO=${VIDEO_RATIO:-1.0}
 AUDIO_RATIO=${AUDIO_RATIO:-1.0}

@@ -36,7 +36,7 @@ LORA_ALPHA=${LORA_ALPHA:-128}
 # The external lib unfuses Qwen3-Omni MoE experts before PEFT attaches LoRA, so expert LoRA
 # should target the unfused nn.Linear names instead of PEFT target_parameters on fused tensors.
 LORA_TARGET_MODULES=${LORA_TARGET_MODULES:-'["q_proj","k_proj","v_proj","o_proj","gate_proj","up_proj","down_proj"]'}
-ATTN_IMPLEMENTATION=${ATTN_IMPLEMENTATION:-flash_attention_2}
+ATTN_IMPLEMENTATION=${ATTN_IMPLEMENTATION:-sdpa}
 LR=${LR:-1.0e-4}
 SAVE_FREQ=${SAVE_FREQ:-150}
 TEST_FREQ=${TEST_FREQ:--1}
