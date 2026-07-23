@@ -17,6 +17,21 @@
 
 The metric is the fraction of held-out preference pairs where the policy assigns
 higher log-probability to the chosen answer than to the rejected answer.
+
+Example:
+    export PYTHONPATH=$PWD
+
+    python examples/dpo_trainer/qwen3_omni/validate_offline_dpo_lora.py \
+        --model-path /path/to/Qwen3-Omni-30B-A3B-Instruct \
+        --adapter-path /path/to/checkpoints/global_step_50/actor \
+        --data-files \
+            /path/to/omni-preference/image/test.parquet \
+            /path/to/omni-preference/video/test.parquet \
+            /path/to/omni-preference/audio/test.parquet \
+        --batch-size 1 \
+        --dtype bfloat16 \
+        --attn-implementation flash_attention_2 \
+        --output-jsonl outputs/qwen3_omni_dpo_lora_eval.jsonl
 """
 
 from __future__ import annotations

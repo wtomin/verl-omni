@@ -18,13 +18,15 @@
 #
 # Override via env: NUM_GPUS, MODEL_PATH, DATA_DIR, TRAIN_SIZE, VAL_SIZE,
 # TOTAL_TRAINING_STEPS, PPO_MINI_BATCH_SIZE, PPO_MICRO_BATCH_SIZE_PER_GPU,
-# LORA_RANK, LORA_ALPHA, LORA_TARGET_MODULES, LORA_TARGET_PARAMETERS,
+# LORA_RANK, LORA_ALPHA, LORA_TARGET_MODULES, QWEN3_OMNI_EXTERNAL_LIB,
 # IMAGE_RATIO, VIDEO_RATIO, AUDIO_RATIO
 set -xeuo pipefail
 
 export NCCL_IB_DISABLE=1
 export CPATH=/usr/include${CPATH:+:$CPATH}
 export RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO=0
+QWEN3_OMNI_EXTERNAL_LIB=${QWEN3_OMNI_EXTERNAL_LIB:-verl_omni.models.transformers.qwen3_omni_thinker_experts}
+export VERL_USE_EXTERNAL_MODULES=${VERL_USE_EXTERNAL_MODULES:-${QWEN3_OMNI_EXTERNAL_LIB}}
 
 NUM_GPUS=${NUM_GPUS:-2}
 MODEL_PATH=${MODEL_PATH:-}
@@ -36,8 +38,9 @@ PPO_MINI_BATCH_SIZE=${PPO_MINI_BATCH_SIZE:-2}
 PPO_MICRO_BATCH_SIZE_PER_GPU=${PPO_MICRO_BATCH_SIZE_PER_GPU:-1}
 LORA_RANK=${LORA_RANK:-8}
 LORA_ALPHA=${LORA_ALPHA:-16}
-LORA_TARGET_MODULES=${LORA_TARGET_MODULES:-'["q_proj","k_proj","v_proj","o_proj"]'}
-LORA_TARGET_PARAMETERS=${LORA_TARGET_PARAMETERS:-'["gate_up_proj","down_proj"]'}
+# The expert-only external lib unfuses MoE experts before PEFT attaches LoRA,
+# so target the resulting nn.Linear modules instead of fused target_parameters.
+LORA_TARGET_MODULES=${LORA_TARGET_MODULES:-'["q_proj","k_proj","v_proj","o_proj","gate_proj","up_proj","down_proj"]'}
 TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE:-2}
 ATTN_IMPLEMENTATION=${ATTN_IMPLEMENTATION:-flash_attention_2}
 IMAGE_RATIO=${IMAGE_RATIO:-1.0}
@@ -99,6 +102,7 @@ python3 -m verl_omni.trainer.main_omni \
     actor_rollout_ref.model.model_type=omni_model \
     actor_rollout_ref.model.tokenizer_path="${MODEL_PATH}" \
     actor_rollout_ref.model.trust_remote_code=true \
+    actor_rollout_ref.model.external_lib="${QWEN3_OMNI_EXTERNAL_LIB}" \
     +actor_rollout_ref.model.override_config.attn_implementation="${ATTN_IMPLEMENTATION}" \
     actor_rollout_ref.model.lora_rank="${LORA_RANK}" \
     actor_rollout_ref.model.lora_alpha="${LORA_ALPHA}" \
