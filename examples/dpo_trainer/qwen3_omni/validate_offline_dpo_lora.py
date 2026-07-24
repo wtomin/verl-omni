@@ -15,11 +15,32 @@
 
 """Validate Qwen3-Omni offline DPO LoRA with held-out preference accuracy.
 
-The metric is the fraction of held-out preference pairs where the policy assigns
-higher log-probability to the chosen answer than to the rejected answer.
+Metrics:
+    raw_policy.accuracy:
+        Pairwise win rate for the LoRA policy. It is the fraction of held-out
+        preference pairs where policy_logp(chosen) > policy_logp(rejected).
+    raw_policy.mean_margin:
+        Mean policy log-probability gap,
+        policy_logp(chosen) - policy_logp(rejected).
+    reference_raw.accuracy:
+        Pairwise win rate for the reference/base model with LoRA disabled.
+        This provides the pre-DPO baseline on the same preference pairs.
+    reference_raw.mean_margin:
+        Mean reference log-probability gap,
+        reference_logp(chosen) - reference_logp(rejected).
+    dpo_reward.accuracy:
+        Pairwise win rate after reference adjustment. It is the fraction of
+        pairs where the DPO reward for chosen is higher than rejected.
+    dpo_reward.mean_margin:
+        Mean DPO reward gap,
+        (policy_logp(chosen) - reference_logp(chosen))
+        - (policy_logp(rejected) - reference_logp(rejected)).
+
+By default, log-probabilities are summed over answer tokens. Pass
+``--average-log-prob`` to compare mean token log-probabilities instead, which is
+often easier to compare across answers with different lengths.
 
 Example:
-    export PYTHONPATH=$PWD
 
     python examples/dpo_trainer/qwen3_omni/validate_offline_dpo_lora.py \
         --model-path /path/to/Qwen3-Omni-30B-A3B-Instruct \
