@@ -49,6 +49,10 @@ _HIGHER_IS_BETTER_KEYS = {
 _NEUTRAL_KEYS = {
     "perf/total_num_images",
 }
+_EXCLUDED_COMPARE_KEYS = { # exclude from comparison because they are very small and sensitive 
+    "timing_per_image_ms/adv",
+    "timing_s/adv",
+}
 
 
 def _as_float(value: Any) -> float | None:
@@ -162,6 +166,8 @@ def _load_records(metrics_jsonl: Path | None, log_file: Path | None) -> list[dic
 
 
 def _compare_direction(key: str) -> str | None:
+    if key in _EXCLUDED_COMPARE_KEYS:
+        return None
     if key in _LOWER_IS_BETTER_KEYS or key.startswith(_LOWER_IS_BETTER_PREFIXES):
         return "lower"
     if key in _HIGHER_IS_BETTER_KEYS:
