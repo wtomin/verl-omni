@@ -18,8 +18,8 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import uuid
-import warnings
 from collections import defaultdict
 from collections.abc import Sequence
 from pathlib import Path
@@ -33,9 +33,11 @@ from torch.utils.data import Dataset, Sampler
 
 from verl_omni.utils.dataset.qwen3_omni_transform import process_qwen3_omni_sample
 
+_MEDIA_TOKEN_PATTERN = re.compile(r"<(image|video|audio)>")
+
 
 def _read_dataframe(data_files: str | Sequence[str]) -> pd.DataFrame:
-    paths = [data_files] if isinstance(data_files, str | Path) else list(data_files)
+    paths = [data_files] if isinstance(data_files, (str | Path)) else list(data_files)
     frames = []
     for data_file in paths:
         path = Path(os.path.expanduser(data_file))
@@ -65,10 +67,87 @@ def _as_python(value: Any) -> Any:
     return value
 
 
+def _is_missing(value: Any) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, float) and np.isnan(value):
+        return True
+    return value is pd.NA
+
+
+def _append_media_path(media: dict[str, list[Any]], key: str, value: Any) -> None:
+    if _is_missing(value):
+        return
+    if value not in media[key]:
+        media[key].append(value)
+
+
+def _normalise_media_list(value: Any) -> list[Any]:
+    value = _as_python(value)
+    if _is_missing(value):
+        return []
+    if isinstance(value, str):
+        return [value] if value else []
+    if isinstance(value, Sequence):
+        return [item for item in value if not _is_missing(item)]
+    return [value]
+
+
+def _initial_media(sample: dict[str, Any]) -> dict[str, list[Any]]:
+    return {
+        "images": _normalise_media_list(sample.get("images")),
+        "videos": _normalise_media_list(sample.get("videos")),
+        "audios": _normalise_media_list(sample.get("audios")),
+    }
+
+
+def _answer_text(answer: Any) -> str:
+    answer = _as_python(answer)
+    if isinstance(answer, dict):
+        if "content" in answer:
+            return _content_to_text(answer["content"])
+        if "text" in answer:
+            return str(answer["text"])
+    return _content_to_text(answer)
+
+
+def _content_to_text(content: Any) -> str:
+    content = _as_python(content)
+    if isinstance(content, str):
+        return content
+    if isinstance(content, dict):
+        if content.get("type") == "text":
+            return str(content.get("text", ""))
+        if "content" in content:
+            return _content_to_text(content["content"])
+        if "text" in content:
+            return str(content["text"])
+        return str(content)
+    if isinstance(content, Sequence):
+        parts = [_content_to_text(item) for item in content]
+        return "\n".join(part for part in parts if part)
+    if _is_missing(content):
+        return ""
+    return str(content)
+
+
+def _append_string_content(conversation: list[Any], content: str) -> None:
+    cursor = 0
+    for match in _MEDIA_TOKEN_PATTERN.finditer(content):
+        text = content[cursor : match.start()]
+        if text:
+            conversation.append(("text", text))
+        conversation.append((match.group(1), None))
+        cursor = match.end()
+    remaining = content[cursor:]
+    if remaining:
+        conversation.append(("text", remaining))
+
+
 def _append_content(conversation: list[Any], content: Any, media: dict[str, list[Any]]) -> None:
     content = _as_python(content)
     if isinstance(content, str):
-        conversation.append(("text", content))
+        _append_string_content(conversation, content)
         return
 
     for item in content or []:
@@ -81,21 +160,41 @@ def _append_content(conversation: list[Any], content: Any, media: dict[str, list
         if item_type == "text":
             conversation.append(("text", item.get("text", "")))
         elif item_type == "image":
-            media["images"].append(item.get("image"))
+            _append_media_path(media, "images", item.get("image"))
             conversation.append(("image", None))
         elif item_type == "video":
-            media["videos"].append(item.get("video"))
+            _append_media_path(media, "videos", item.get("video"))
             conversation.append(("video", None))
         elif item_type == "audio":
-            media["audios"].append(item.get("audio"))
+            _append_media_path(media, "audios", item.get("audio"))
             conversation.append(("audio", None))
         else:
             conversation.append(("text", str(item)))
 
 
-def _build_preference_branch(sample: dict[str, Any], answer: str) -> dict[str, Any]:
+def _count_media_tokens(conversations: Sequence[Sequence[Any]], modality: str) -> int:
+    count = 0
+    for conversation in conversations:
+        for item in conversation[1:]:
+            if isinstance(item, (list | tuple)) and item and item[0] == modality:
+                count += 1
+    return count
+
+
+def _validate_media_alignment(conversations: Sequence[Sequence[Any]], media: dict[str, list[Any]]) -> None:
+    for modality, media_key in (("image", "images"), ("video", "videos"), ("audio", "audios")):
+        token_count = _count_media_tokens(conversations, modality)
+        media_count = len(media[media_key])
+        if token_count != media_count:
+            raise ValueError(
+                f"Prompt contains {token_count} <{modality}> token(s) but {media_key} has {media_count} item(s). "
+                "Ensure compact multimodal rows include matching top-level media paths."
+            )
+
+
+def _build_preference_branch(sample: dict[str, Any], answer: Any) -> dict[str, Any]:
     prompt = _as_python(sample.get("prompt", []))
-    media: dict[str, list[Any]] = {"images": [], "videos": [], "audios": []}
+    media = _initial_media(sample)
     conversations: list[list[Any]] = []
 
     for message in prompt:
@@ -110,7 +209,8 @@ def _build_preference_branch(sample: dict[str, Any], answer: str) -> dict[str, A
         if len(conversation) > 1:
             conversations.append(conversation)
 
-    conversations.append(["assistant", ("text", str(_as_python(answer)))])
+    _validate_media_alignment(conversations, media)
+    conversations.append(["assistant", ("text", _answer_text(answer))])
     branch = {
         "conversations": conversations,
         "source_name": sample.get("source_name") or sample.get("data_source"),
@@ -121,9 +221,33 @@ def _build_preference_branch(sample: dict[str, Any], answer: str) -> dict[str, A
     return branch
 
 
-def _cat_sequence_tensors(chosen: torch.Tensor, rejected: torch.Tensor) -> torch.Tensor:
-    dim = -1 if chosen.ndim > 1 else 0
-    return torch.cat([chosen, rejected], dim=dim)
+def _pad_tensor_to_shape(tensor: torch.Tensor, shape: Sequence[int], pad_value: float | int | bool = 0) -> torch.Tensor:
+    if tuple(tensor.shape) == tuple(shape):
+        return tensor
+    output = torch.full(tuple(shape), pad_value, dtype=tensor.dtype, device=tensor.device)
+    slices = tuple(slice(0, size) for size in tensor.shape)
+    output[slices] = tensor
+    return output
+
+
+def _pad_value_for_key(key: str) -> float | int | bool:
+    if key == "labels":
+        return -100
+    if key == "attention_mask":
+        return 0
+    return 0
+
+
+def _stack_branch_tensors(key: str, chosen: torch.Tensor, rejected: torch.Tensor) -> torch.Tensor:
+    max_shape = tuple(max(chosen.shape[dim], rejected.shape[dim]) for dim in range(chosen.ndim))
+    pad_value = _pad_value_for_key(key)
+    return torch.stack(
+        [
+            _pad_tensor_to_shape(chosen, max_shape, pad_value),
+            _pad_tensor_to_shape(rejected, max_shape, pad_value),
+        ],
+        dim=0,
+    )
 
 
 def _merge_chosen_rejected(chosen: dict[str, Any], rejected: dict[str, Any]) -> dict[str, Any]:
@@ -140,20 +264,8 @@ def _merge_chosen_rejected(chosen: dict[str, Any], rejected: dict[str, Any]) -> 
         if not isinstance(chosen_value, torch.Tensor) or not isinstance(rejected_value, torch.Tensor):
             merged[key] = chosen_value
             continue
-        if key in {"input_ids", "attention_mask", "labels", "position_ids", "image_mask", "video_mask", "audio_mask"}:
-            merged[key] = _cat_sequence_tensors(chosen_value, rejected_value)
-        else:
-            merged[key] = torch.cat([chosen_value, rejected_value], dim=0)
+        merged[key] = _stack_branch_tensors(key, chosen_value, rejected_value)
     return merged
-
-
-def _pad_tensor_to_shape(tensor: torch.Tensor, shape: Sequence[int], pad_value: float | int | bool = 0) -> torch.Tensor:
-    if tuple(tensor.shape) == tuple(shape):
-        return tensor
-    output = torch.full(tuple(shape), pad_value, dtype=tensor.dtype, device=tensor.device)
-    slices = tuple(slice(0, size) for size in tensor.shape)
-    output[slices] = tensor
-    return output
 
 
 def _collate_tensor_values(key: str, values: Sequence[torch.Tensor | None]) -> torch.Tensor:
@@ -162,11 +274,7 @@ def _collate_tensor_values(key: str, values: Sequence[torch.Tensor | None]) -> t
         raise ValueError(f"Cannot collate tensor key {key!r} without any tensor values.")
 
     max_shape = tuple(max(value.shape[dim] for value in present) for dim in range(present[0].ndim))
-    pad_value: float | int | bool = 0
-    if key == "labels":
-        pad_value = -100
-    elif key == "attention_mask":
-        pad_value = 0
+    pad_value = _pad_value_for_key(key)
 
     padded = []
     for value in values:
@@ -240,6 +348,9 @@ def _row_modality(row: dict[str, Any], source_name_key: str, default: str = "unk
     extra_info = _as_python(row.get("extra_info", {}))
     if isinstance(extra_info, dict) and extra_info.get("modality"):
         return _normalise_modality(extra_info["modality"], default)
+    for key, modality in (("images", "image"), ("videos", "video"), ("audios", "audio")):
+        if _normalise_media_list(row.get(key)):
+            return modality
     return _normalise_modality(row.get(source_name_key) or row.get("source_name"), default)
 
 
@@ -312,6 +423,9 @@ class OfflineMLLMDPODataset(Dataset):
             "chosen": row[self.chosen_key],
             "rejected": row[self.rejected_key],
             "source_name": source_name,
+            "images": row.get("images"),
+            "videos": row.get("videos"),
+            "audios": row.get("audios"),
         }
         transformed = _transform_sample(
             sample, self.base_transform, {"processor": self.processor, **self.transform_kwargs}
@@ -333,30 +447,14 @@ class OfflineMLLMDPODataset(Dataset):
 
 
 class ModalityGroupedBatchSampler(Sampler[int]):
-    """Sample dataset indices as contiguous same-modality chunks.
+    """Yield indices in same-modality chunks for regular DataLoader batching.
 
-    This sampler is used with ``StatefulDataLoader`` via ``sampler=`` and
-    ``batch_size=`` rather than ``batch_sampler=``. It yields individual
-    indices, but orders them so each DataLoader batch contains rows from one
-    modality. Each chunk samples a modality uniformly by default, or according
-    to ``modality_sample_weights`` when provided, then samples rows from that
+    ``StatefulDataLoader`` is configured with ``sampler=`` and ``batch_size=``,
+    not ``batch_sampler=``. This sampler therefore yields individual indices,
+    but orders them as contiguous same-modality chunks of ``batch_size``. When
+    Each chunk first samples a modality uniformly by default, or by
+    ``modality_sample_weights`` when provided, then samples rows from that
     modality with replacement.
-
-    Args:
-        data_source: Dataset that provides ``get_modality(index)``.
-        dataset: Alternative name for ``data_source``.
-        data_config: Optional config used to infer ``batch_size`` from
-            ``gen_batch_size`` or ``train_batch_size``.
-        batch_size: Number of samples per same-modality chunk.
-        shuffle: Accepted for DataLoader compatibility and ignored.
-        drop_last: Whether to drop an incomplete final chunk when deriving the
-            number of chunks.
-        seed: Base random seed used for deterministic sampling by epoch.
-        modality_sample_weights: Optional sampling weight per modality.
-        num_batches: Optional explicit number of chunks to generate.
-
-    Returns:
-        Iterator over dataset indices ordered as same-modality chunks.
     """
 
     def __init__(
@@ -372,13 +470,6 @@ class ModalityGroupedBatchSampler(Sampler[int]):
         modality_sample_weights: dict[str, float] | None = None,
         num_batches: int | None = None,
     ):
-        if not shuffle:
-            warnings.warn(
-                "ModalityGroupedBatchSampler ignores shuffle=False; sampling order is controlled by modality "
-                "grouping, modality_sample_weights, and seed.",
-                UserWarning,
-                stacklevel=2,
-            )
         del shuffle
         self.data_source = data_source if data_source is not None else dataset
         if self.data_source is None:
@@ -460,20 +551,6 @@ class ModalityGroupedBatchSampler(Sampler[int]):
 
 
 def offline_mllm_dpo_collate_fn(features):
-    """Collate Offline MLLM DPO samples into a single-modality batch.
-
-    The collator requires every sample in the batch to share the same modality,
-    stacks tensor fields with modality-aware padding, and stores non-tensor
-    fields in object arrays.
-
-    Args:
-        features: Sequence of dataset samples produced by
-            ``OfflineMLLMDPODataset``.
-
-    Returns:
-        Batch dictionary containing collated tensor fields and object arrays for
-        non-tensor fields.
-    """
     modalities = {feature.get("modality") for feature in features}
     if len(modalities) != 1:
         raise ValueError(f"Offline MLLM DPO batches must contain a single modality, got {sorted(modalities)}")
@@ -488,6 +565,8 @@ def offline_mllm_dpo_collate_fn(features):
         batch[key] = _collate_tensor_values(key, [feature.get(key) for feature in features])
         if key == "position_ids" and batch[key].ndim == 4 and batch[key].shape[2] == 1:
             batch[key] = batch[key].squeeze(2).contiguous()
+        if key == "position_ids" and batch[key].ndim == 5 and batch[key].shape[3] == 1:
+            batch[key] = batch[key].squeeze(3).contiguous()
     for key in sorted(non_tensor_keys):
         batch[key] = np.fromiter((feature.get(key) for feature in features), dtype=object, count=len(features))
     return batch
