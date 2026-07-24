@@ -53,6 +53,8 @@ Example:
         --dtype bfloat16 \
         --attn-implementation flash_attention_2 \
         --output-jsonl outputs/qwen3_omni_dpo_lora_eval.jsonl
+
+If OOM, please try to reduce the batch size or set `--device-map "auto"` to split the model across multiple GPUs.
 """
 
 from __future__ import annotations
