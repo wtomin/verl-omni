@@ -66,6 +66,7 @@ from verl_omni.utils.peft_utils import peft_adapters_disabled, set_peft_adapter 
 logger = logging.getLogger("qwen3_omni_dpo_validation")
 
 DEFAULT_EXTERNAL_LIB = "verl_omni.models.transformers.qwen3_omni_thinker_experts"
+DEFAULT_EXCLUDE_MODULES = ".*talker.*|.*code2wav.*|.*code_predictor.*|.*visual.*|.*audio_tower.*"
 DEFAULT_MM_CONFIGS = {
     "scale_factor": 28,
     "image_min_pixels": 3136,
@@ -193,6 +194,14 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Use mean token logprob instead of sum logprob.",
     )
+    parser.add_argument(
+        "--exclude-modules",
+        default=DEFAULT_EXCLUDE_MODULES,
+        help=(
+            "Regex/list passed to PEFT LoraConfig.exclude_modules before injection. Defaults to the thinker-only "
+            "training script exclusion pattern; pass an empty string to use the adapter config unchanged."
+        ),
+    )
     parser.add_argument("--log-every", type=int, default=20, help="Print progress every N batches.")
     parser.add_argument("--prompt-key", default="prompt")
     parser.add_argument("--chosen-key", default="chosen")
@@ -225,6 +234,7 @@ def configure_logging(log_level: str) -> None:
         level=getattr(logging, log_level),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
+        force=True,
     )
 
 
@@ -326,10 +336,19 @@ def score_preference_batch(
     )
 
 
-def load_lora_adapter_weights(model, adapter_path: str, adapter_name: str = "default") -> None:
+def load_lora_adapter_weights(
+    model,
+    adapter_path: str,
+    adapter_name: str = "default",
+    exclude_modules: str | list[str] | None = None,
+) -> None:
     """Load LoRA weights without wrapping the model in ``PeftModel``."""
     load_lora_adapter = getattr(model, "load_lora_adapter", None)
     if callable(load_lora_adapter):
+        if exclude_modules:
+            logger.warning(
+                "Native load_lora_adapter() does not receive validation exclude_modules=%r.", exclude_modules
+            )
         load_lora_adapter(adapter_path, adapter_name=adapter_name)
         return
 
@@ -349,6 +368,13 @@ def load_lora_adapter_weights(model, adapter_path: str, adapter_name: str = "def
             lora_config = LoraConfig.from_dict(json.load(f))
     else:
         lora_config = LoraConfig.from_pretrained(adapter_path)
+
+    if exclude_modules:
+        if hasattr(lora_config, "exclude_modules"):
+            logger.info("Applying LoRA exclude_modules before injection: %s", exclude_modules)
+            lora_config.exclude_modules = exclude_modules
+        else:
+            logger.warning("PEFT LoraConfig does not expose exclude_modules; using adapter config unchanged.")
 
     inject_adapter_in_model(lora_config, model, adapter_name=adapter_name)
     adapter_state_dict = safetensors_load_file(adapter_weights_path)
@@ -457,7 +483,7 @@ def load_qwen3_omni_lora_model(args: argparse.Namespace):
     maybe_unfuse_qwen3_omni_experts(model, args.external_lib)
 
     logger.info("Loading LoRA adapter weights from %s", adapter_path)
-    load_lora_adapter_weights(model, adapter_path)
+    load_lora_adapter_weights(model, adapter_path, exclude_modules=args.exclude_modules or None)
 
     set_lora_adapter(model, "default")
     if args.device_map is None:
