@@ -70,7 +70,30 @@ def _set_child_adapters_enabled(model: Any, enabled: bool) -> int:
         enable_adapters = getattr(module, "enable_adapters", None)
         if not callable(enable_adapters):
             continue
-        enable_adapters(enabled)
+        try:
+            enable_adapters(enabled)
+        except TypeError:
+            if enabled:
+                try:
+                    enable_adapters()
+                except ValueError as exc:
+                    if not _is_no_adapter_loaded(exc):
+                        raise
+                    continue
+            else:
+                disable_adapters = getattr(module, "disable_adapters", None)
+                if not callable(disable_adapters):
+                    continue
+                try:
+                    disable_adapters()
+                except ValueError as exc:
+                    if not _is_no_adapter_loaded(exc):
+                        raise
+                    continue
+        except ValueError as exc:
+            if not _is_no_adapter_loaded(exc):
+                raise
+            continue
         updated += 1
     return updated
 

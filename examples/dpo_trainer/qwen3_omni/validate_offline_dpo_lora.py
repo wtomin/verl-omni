@@ -579,6 +579,8 @@ def main() -> None:
 
     raw_stats = RunningStats()
     raw_stats_by_modality: dict[str, RunningStats] = defaultdict(RunningStats)
+    reference_raw_stats = RunningStats()
+    reference_raw_stats_by_modality: dict[str, RunningStats] = defaultdict(RunningStats)
     dpo_stats = RunningStats()
     dpo_stats_by_modality: dict[str, RunningStats] = defaultdict(RunningStats)
     batch_count = 0
@@ -637,6 +639,9 @@ def main() -> None:
                 if reference_scores is not None:
                     ref_chosen = float(reference_scores.chosen_logps[offset].detach().cpu())
                     ref_rejected = float(reference_scores.rejected_logps[offset].detach().cpu())
+                    reference_raw_margin = ref_chosen - ref_rejected
+                    reference_raw_stats.update(reference_raw_margin)
+                    reference_raw_stats_by_modality[modality].update(reference_raw_margin)
                     chosen_reward = chosen - ref_chosen
                     rejected_reward = rejected - ref_rejected
                     dpo_margin = chosen_reward - rejected_reward
@@ -646,6 +651,8 @@ def main() -> None:
                         {
                             "reference_chosen_logp": ref_chosen,
                             "reference_rejected_logp": ref_rejected,
+                            "reference_raw_margin": reference_raw_margin,
+                            "reference_raw_correct": reference_raw_margin > 0,
                             "chosen_reward": chosen_reward,
                             "rejected_reward": rejected_reward,
                             "dpo_margin": dpo_margin,
@@ -660,6 +667,7 @@ def main() -> None:
                 elapsed = time.perf_counter() - started_at
                 logger.info(
                     "Progress: batches=%d/%d samples=%d/%d raw_accuracy=%.4f raw_margin=%.4f "
+                    "reference_raw_accuracy=%.4f reference_raw_margin=%.4f "
                     "dpo_accuracy=%.4f dpo_margin=%.4f elapsed=%.1fs",
                     batch_count,
                     total_batches,
@@ -667,6 +675,8 @@ def main() -> None:
                     len(dataset),
                     raw_stats.accuracy,
                     raw_stats.mean_margin,
+                    reference_raw_stats.accuracy,
+                    reference_raw_stats.mean_margin,
                     dpo_stats.accuracy,
                     dpo_stats.mean_margin,
                     elapsed,
@@ -677,6 +687,15 @@ def main() -> None:
             "overall": raw_stats.to_dict(),
             "by_modality": {
                 modality: modality_stats.to_dict() for modality, modality_stats in raw_stats_by_modality.items()
+            },
+        },
+        "reference_raw": None
+        if args.skip_reference
+        else {
+            "overall": reference_raw_stats.to_dict(),
+            "by_modality": {
+                modality: modality_stats.to_dict()
+                for modality, modality_stats in reference_raw_stats_by_modality.items()
             },
         },
         "dpo_reward": None
@@ -692,9 +711,12 @@ def main() -> None:
     }
     logger.info("Validation finished in %.1fs", time.perf_counter() - started_at)
     logger.info(
-        "Final raw_accuracy=%.4f raw_margin=%.4f dpo_accuracy=%.4f dpo_margin=%.4f",
+        "Final raw_accuracy=%.4f raw_margin=%.4f reference_raw_accuracy=%.4f "
+        "reference_raw_margin=%.4f dpo_accuracy=%.4f dpo_margin=%.4f",
         raw_stats.accuracy,
         raw_stats.mean_margin,
+        reference_raw_stats.accuracy,
+        reference_raw_stats.mean_margin,
         dpo_stats.accuracy,
         dpo_stats.mean_margin,
     )
