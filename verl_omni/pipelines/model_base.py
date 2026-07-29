@@ -601,42 +601,6 @@ class OmniModelBase(ABC):
         """
         pass
 
-    _TRAINING_INPUT_KEYS = (
-        "input_ids",
-        "attention_mask",
-        "labels",
-        "position_ids",
-        "pixel_values",
-        "image_grid_thw",
-        "pixel_values_videos",
-        "video_grid_thw",
-        "input_features",
-        "feature_attention_mask",
-        "audio_feature_lengths",
-    )
-
-    @classmethod
-    def prepare_training_inputs(
-        cls,
-        model_config,
-        micro_batch: TensorDict,
-        *,
-        dtype: Optional[torch.dtype] = None,
-    ) -> dict[str, Any]:
-        """Extract standard AR/MLLM training keys from a micro-batch.
-
-        Model-family adapters override this to apply architecture-specific
-        normalization before ``model(**model_inputs)``.
-        """
-        model_inputs: dict[str, Any] = {}
-        for key in cls._TRAINING_INPUT_KEYS:
-            if key not in micro_batch.keys():
-                continue
-            value = micro_batch.get(key)
-            if value is not None:
-                model_inputs[key] = value
-        return model_inputs
-
     @classmethod
     @abstractmethod
     def prepare_model_inputs(
