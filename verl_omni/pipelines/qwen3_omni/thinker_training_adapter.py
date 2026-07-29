@@ -24,11 +24,10 @@ import logging
 import os
 from typing import Any, Optional
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 from tensordict import TensorDict
-
-import numpy as np
 
 from verl_omni.pipelines.model_base import OmniModelBase
 
@@ -179,87 +178,29 @@ class Qwen3OmniThinkerAdapter(OmniModelBase):
         *,
         dtype: torch.dtype | None = None,
     ) -> dict[str, Any]:
-        """Build Qwen3-Omni thinker forward kwargs from a training micro-batch.
+        """Prepare Qwen3-Omni thinker inputs for a model forward.
 
-        Uses ``micro_batch`` , then applies Qwen3-Omni
-        normalization so the result can be passed to
-        ``model(**model_inputs, use_cache=False)``.
-
-        ``micro_batch`` key contract
-        ----------------------------
-
-        **Required (text / log-prob)**
-
-        - ``input_ids`` (``LongTensor``, shape ``(B, L)``): Token ids for the
-          full prompt + response sequence. Multimodal placeholder positions may
-          use model-specific sentinel indices before the thinker forward.
-        - ``attention_mask`` (``LongTensor`` or ``BoolTensor``, shape ``(B, L)``):
-          ``1``/``True`` for real tokens, ``0``/``False`` for padding.
-        - ``labels`` (``LongTensor``, shape ``(B, L)``): Supervision mask for
-          token log-prob computation. Prompt positions must be ``-100``;
-          response positions carry the target token ids. The trainer/engine
-          typically shifts these internally when gathering log-probs.
-        - ``position_ids`` (``LongTensor``): mRoPE positions for Qwen3-Omni.
-          Accepted layouts:
-
-          - ``(B, 3, L)`` — preferred after dataset collation;
-          - ``(B, 3, 1, L)`` — collated with an extra singleton axis; squeezed
-            here to ``(B, 3, L)``;
-          - other ranks are passed through unchanged.
-
-        **Optional (image)**
-
-        Include both keys when the sample contains images:
-
-        - ``pixel_values`` (``FloatTensor``, shape ``(B, N_img, D)`` or
-          ``(N_img, D)`` after per-sample padding): Vision patch embeddings fed
-          to the thinker. Zero-padded rows (entire row is zero) are dropped.
-        - ``image_grid_thw`` (``LongTensor``, shape ``(B, N_img, 3)`` or
-          ``(N_img, 3)``): ``(T, H, W)`` grid metadata per image patch group.
-          Zero rows are dropped to match the filtered ``pixel_values``.
-
-        **Optional (video)**
-
-        Include both keys when the sample contains videos:
-
-        - ``pixel_values_videos`` (``FloatTensor``): Same role as
-          ``pixel_values`` but for video patches.
-        - ``video_grid_thw`` (``LongTensor``): Same role as ``image_grid_thw``
-          but for video patch groups.
-
-        **Optional (audio)**
-
-        Include when the sample contains audio:
-
-        - ``input_features`` (``FloatTensor``, shape ``(B, N_audio, D)`` or
-          ``(N_audio, D)``): Audio features for the thinker. Zero-padded rows
-          are dropped.
-        - ``feature_attention_mask`` (``LongTensor`` or ``BoolTensor``):
-          Per-audio-frame validity mask from the processor. Passed through to
-          the model when present; not rewritten here.
-        - ``audio_feature_lengths`` (``LongTensor``, shape ``(B,)`` or
-          ``(B, 1)``): Effective audio feature length per sample. Entries equal
-          to ``0`` are removed; 1-D inputs are flattened first.
-
-
-
-        Normalization applied here
-        --------------------------
-
-        - Squeeze mRoPE ``position_ids`` when an extra singleton axis is present.
-        - Drop all-zero rows from padded image/video/audio tensors and grids.
-        - Cast floating-point multimodal tensors to ``dtype`` when provided.
+        This keeps the fields produced by the collate path and normalizes the
+        padded multimodal tensors before ``model(**model_inputs, use_cache=False)``.
 
         Args:
-            model_config: ``OmniModelConfig`` (or compatible object with
-                ``architecture`` and ``model_stage`` for registry lookup).
-            micro_batch: ``TensorDict`` produced by the dataloader/collate path.
-            dtype: Optional parameter dtype for ``pixel_values``,
-                ``pixel_values_videos``, and ``input_features``.
+            model_config: Omni model config used for adapter-specific behavior.
+            micro_batch: Training batch. Required text keys are ``input_ids``,
+                ``attention_mask``, ``labels``, and ``position_ids``. Optional
+                multimodal keys include ``pixel_values`` / ``image_grid_thw``,
+                ``pixel_values_videos`` / ``video_grid_thw``, ``input_features``,
+                ``feature_attention_mask``, and ``audio_feature_lengths``.
+            dtype: Optional dtype for floating-point image, video, and audio
+                tensors.
 
         Returns:
-            dict[str, Any]: Keyword arguments ready for the thinker
-            ``forward()`` call.
+            Forward keyword arguments for the Qwen3-Omni thinker.
+
+        Notes:
+            ``position_ids`` with shape ``(B, 3, 1, L)`` are squeezed to
+            ``(B, 3, L)``. All-zero padded rows are removed from image, video,
+            and audio tensors. Callers should remove trainer-only metadata
+            before passing the result to the model forward.
         """
         model_inputs = dict(micro_batch)
 
