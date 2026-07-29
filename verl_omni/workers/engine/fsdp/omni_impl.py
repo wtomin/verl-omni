@@ -11,14 +11,26 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""FSDP engine for omni models, registered as ``model_type="omni_model"``."""
+
+"""FSDP engine for omni models, registered as ``model_type="omni_model"``.
+
+Model loading follows PR #258: ``AutoModelForMultimodalLM`` plus
+``OmniModelBase.configure_model``. Policy-gradient training reuses verl's
+``FSDPEngineWithLMHead`` loop with omni-specific ``prepare_model_inputs``.
+Offline paired DPO branches on ``model_config.trainer_type`` (``direct_preference``).
+"""
 
 import logging
+import os
 import warnings
+from typing import Any, Callable, Optional
 
 import torch
+from tensordict import TensorDict
 from torch.distributed.tensor import DTensor
 from transformers import AutoModelForMultimodalLM
+from verl.trainer.config import CheckpointConfig
+from verl.utils import tensordict_utils as tu
 from verl.utils.debug import log_gpu_memory_usage
 from verl.utils.device import get_device_id
 from verl.utils.fsdp_utils import (
@@ -30,18 +42,145 @@ from verl.utils.fsdp_utils import (
     replace_lora_wrapper,
 )
 from verl.utils.model import convert_weight_keys
+from verl.utils.torch_dtypes import PrecisionType
+from verl.workers.config import FSDPEngineConfig, FSDPOptimizerConfig
 from verl.workers.engine.base import EngineRegistry
 from verl.workers.engine.fsdp.transformer_impl import FSDPEngineWithLMHead
+from verl.workers.engine.utils import prepare_micro_batches
 
+from verl_omni.pipelines.utils import (
+    compute_omni_preference_logps,
+    prepare_omni_model_inputs,
+    prepare_omni_preference_inputs,
+)
 from verl_omni.utils.fsdp_utils import collect_lora_params
 from verl_omni.workers.config import OmniModelConfig
 
 logger = logging.getLogger(__name__)
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 
 @EngineRegistry.register(model_type="omni_model", backend=["fsdp", "fsdp2"], device=["cuda", "npu"])
 class OmniFSDPEngine(FSDPEngineWithLMHead):
     """FSDP engine for omni models"""
+
+    def __init__(
+        self,
+        model_config: OmniModelConfig,
+        engine_config: FSDPEngineConfig,
+        optimizer_config: FSDPOptimizerConfig,
+        checkpoint_config: CheckpointConfig,
+    ):
+        super().__init__(model_config, engine_config, optimizer_config, checkpoint_config)
+        self._is_lora = self.model_config.lora_rank > 0 or self.model_config.lora_adapter_path is not None
+        self._trainer_type = getattr(model_config, "trainer_type", "policy_gradient")
+
+    def _is_direct_preference(self) -> bool:
+        return self._trainer_type == "direct_preference"
+
+    def prepare_model_inputs(self, micro_batch: TensorDict):
+        """Apply omni adapter normalization, then run verl's LM packing path."""
+        param_dtype = getattr(self, "_autocast_dtype", None)
+        omni_inputs = prepare_omni_model_inputs(self.model_config, micro_batch, dtype=param_dtype)
+        merged = {key: micro_batch.get(key) for key in micro_batch.keys()}
+        merged.update(omni_inputs)
+        batch_size = micro_batch.batch_size[0] if micro_batch.batch_size else omni_inputs["input_ids"].shape[0]
+        return super().prepare_model_inputs(TensorDict.from_dict(merged, batch_size=[batch_size]))
+
+    def _preference_forward(self, model, micro_batch: TensorDict | dict[str, Any]):
+        model_inputs, labels, pair_batch_size = prepare_omni_preference_inputs(
+            self.model_config,
+            micro_batch,
+            dtype=next(self.module.parameters()).dtype,
+        )
+        outputs = model(**model_inputs, use_cache=False)
+        logits = outputs.logits if hasattr(outputs, "logits") else outputs[0]
+        return compute_omni_preference_logps(
+            self.model_config,
+            logits,
+            labels,
+            pair_batch_size,
+            average_log_prob=tu.get_non_tensor_data(micro_batch, "average_log_prob", default=False),
+        )
+
+    def _forward_backward_preference_micro_batch(self, micro_batch: TensorDict, loss_function: Callable):
+        micro_batch = micro_batch.to(get_device_id())
+        tu.assign_non_tensor(
+            micro_batch,
+            average_log_prob=tu.get_non_tensor_data(micro_batch, "average_log_prob", default=False),
+        )
+        policy_chosen_logps, policy_rejected_logps = self._preference_forward(self.module, micro_batch)
+        model_output = {
+            "policy_chosen_logps": policy_chosen_logps,
+            "policy_rejected_logps": policy_rejected_logps,
+            "reference_chosen_logps": micro_batch["reference_chosen_logps"],
+            "reference_rejected_logps": micro_batch["reference_rejected_logps"],
+        }
+        loss, metrics = loss_function(model_output=model_output, data=micro_batch)
+        loss.backward()
+        return loss.detach(), metrics
+
+    def train_batch(self, data: TensorDict, loss_function: Optional[Callable] = None):
+        if not self._is_direct_preference():
+            return super().train_batch(data, loss_function=loss_function)
+        if loss_function is None:
+            raise ValueError("OmniFSDPEngine.train_batch requires a loss_function for direct_preference training.")
+        config = getattr(loss_function, "keywords", {}).get("config")
+        loss_config = getattr(config, "omni_loss", None)
+        tu.assign_non_tensor(data, average_log_prob=getattr(loss_config, "average_log_prob", False))
+        micro_batches, _ = prepare_micro_batches(
+            data=data,
+            dp_group=self.get_data_parallel_group(),
+            same_micro_num_in_dp=True,
+        )
+        gradient_accumulation_steps = len(micro_batches)
+        losses = []
+        metrics: dict[str, list[Any]] = {}
+        for micro_batch in micro_batches:
+            tu.assign_non_tensor(micro_batch, gradient_accumulation_steps=gradient_accumulation_steps)
+            loss, micro_metrics = self._forward_backward_preference_micro_batch(micro_batch, loss_function)
+            losses.append(loss.item())
+            for key, value in micro_metrics.items():
+                metrics.setdefault(key, []).append(value)
+        grad_norm = self.optimizer_step()
+        self.optimizer_zero_grad()
+        metrics["grad_norm"] = grad_norm
+        return {"model_output": {}, "loss": losses, "metrics": metrics}
+
+    def infer_batch(self, data: TensorDict, loss_function: Optional[Callable] = None):
+        if not self._is_direct_preference():
+            return super().infer_batch(data, loss_function=loss_function)
+        del loss_function
+        micro_batches, _ = prepare_micro_batches(
+            data=data,
+            dp_group=self.get_data_parallel_group(),
+            same_micro_num_in_dp=True,
+        )
+        chosen_logps = []
+        rejected_logps = []
+        with torch.no_grad():
+            for micro_batch in micro_batches:
+                micro_batch = micro_batch.to(get_device_id())
+                chosen, rejected = self._preference_forward(self.module, micro_batch)
+                chosen_logps.append(chosen)
+                rejected_logps.append(rejected)
+        return {
+            "model_output": {
+                "chosen_logps": torch.cat(chosen_logps, dim=0),
+                "rejected_logps": torch.cat(rejected_logps, dim=0),
+            },
+            "loss": [0.0],
+            "metrics": {},
+        }
+
+    def optimizer_zero_grad(self):
+        if self.optimizer is not None:
+            self.optimizer.zero_grad()
+
+    def lr_scheduler_step(self):
+        if self.lr_scheduler is None:
+            return None
+        return super().lr_scheduler_step()
 
     def get_per_tensor_param(self, layered_summon=False, base_sync_done=False, **kwargs):
         log_gpu_memory_usage("Before load_fsdp_model_to_gpu", logger=logger)
@@ -143,8 +282,6 @@ class OmniFSDPEngine(FSDPEngineWithLMHead):
             log_gpu_memory_usage("After offload_fsdp_model_to_cpu", logger=logger)
 
     def _build_module(self):
-        from verl.utils.torch_dtypes import PrecisionType
-
         from verl_omni.pipelines.model_base import OmniModelBase
 
         self.model_config: OmniModelConfig

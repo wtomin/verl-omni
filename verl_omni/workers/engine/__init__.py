@@ -15,9 +15,9 @@ from .fsdp import (  # noqa: F401
     DiffusersFSDPEngine,
     DPODiffusersFSDPEngine,
     NFTDiffusersFSDPEngine,
+    OmniFSDPEngine,
     PPODiffusersFSDPEngine,
 )
-from .fsdp.omni_impl import OmniFSDPEngine  # noqa: F401
 
 try:
     from .veomni import VeOmniDiffusionEngine  # noqa: F401
@@ -29,6 +29,6 @@ __all__ = [
     "DPODiffusersFSDPEngine",
     "NFTDiffusersFSDPEngine",
     "DiffusersFSDPEngine",
-    "VeOmniDiffusionEngine",
     "OmniFSDPEngine",
+    "VeOmniDiffusionEngine",
 ]
