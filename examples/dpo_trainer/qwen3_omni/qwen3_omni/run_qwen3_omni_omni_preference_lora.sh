@@ -28,6 +28,7 @@ TOTAL_TRAINING_STEPS=${TOTAL_TRAINING_STEPS:-100}
 NUM_GPUS=${NUM_GPUS:-4}
 
 TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE:-64}
+VAL_BATCH_SIZE=${VAL_BATCH_SIZE:-1}
 PPO_MINI_BATCH_SIZE=${PPO_MINI_BATCH_SIZE:-8}
 PPO_MICRO_BATCH_SIZE_PER_GPU=${PPO_MICRO_BATCH_SIZE_PER_GPU:-2}
 
@@ -72,12 +73,17 @@ python3 -m verl_omni.trainer.main_omni \
     data.train_files="${TRAIN_FILES}" \
     data.val_files="${VAL_FILES}" \
     data.train_batch_size="${TRAIN_BATCH_SIZE}" \
+    data.val_batch_size="${VAL_BATCH_SIZE}" \
+    +data.pad_mode=no_padding \
     data.custom_cls.path=pkg://verl_omni.utils.dataset.offline_mllm_dpo_dataset \
     data.custom_cls.name=OfflineMLLMDPODataset \
     data.custom_cls.collate_fn=offline_mllm_dpo_collate_fn \
-    data.sampler.class_path=pkg://verl_omni.utils.dataset.offline_mllm_dpo_dataset \
-    data.sampler.class_name=ModalityGroupedBatchSampler \
-    +data.sampler.sampler_kwargs="{batch_size:${TRAIN_BATCH_SIZE},drop_last:true,num_batches:${TOTAL_TRAINING_STEPS},modality_sample_weights:{image:${IMAGE_RATIO},video:${VIDEO_RATIO},audio:${AUDIO_RATIO}}}" \
+    +data.train_sampler.class_path=pkg://verl_omni.utils.dataset.offline_mllm_dpo_dataset \
+    +data.train_sampler.class_name=ModalityGroupedBatchSampler \
+    +data.train_sampler.sampler_kwargs="{batch_size:${TRAIN_BATCH_SIZE},drop_last:true,num_batches:${TOTAL_TRAINING_STEPS},modality_sample_weights:{image:${IMAGE_RATIO},video:${VIDEO_RATIO},audio:${AUDIO_RATIO}}}" \
+    +data.val_sampler.class_path=pkg://verl_omni.utils.dataset.offline_mllm_dpo_dataset \
+    +data.val_sampler.class_name=ModalityGroupedBatchSampler \
+    +data.val_sampler.sampler_kwargs="{batch_size:${VAL_BATCH_SIZE},shuffle:false,drop_last:false,replacement:false}" \
     +data.mm_configs="{scale_factor:28,image_min_pixels:3136,image_max_pixels:602112,video_min_pixels:100352,video_max_pixels:602112,max_ratio:200,min_frames:4,max_frames:8,frame_factor:2,sample_rate:16000,fps:2.0,use_audio_in_video:false}" \
     actor_rollout_ref.model.path="${MODEL_PATH}" \
     actor_rollout_ref.model.hf_config_path="${MODEL_PATH}" \
@@ -93,7 +99,7 @@ python3 -m verl_omni.trainer.main_omni \
     actor_rollout_ref.model.lora.dropout="${LORA_DROPOUT}" \
     actor_rollout_ref.model.target_modules="${LORA_TARGET_MODULES}" \
     actor_rollout_ref.model.exclude_modules="${EXCLUDE_MODULES}" \
-    actor_rollout_ref.model.use_remove_padding=false \
+    actor_rollout_ref.model.use_remove_padding=true \
     actor_rollout_ref.actor.trainer_type=direct_preference \
     actor_rollout_ref.actor.omni_loss.loss_mode=dpo \
     actor_rollout_ref.actor.omni_loss.beta=0.1 \

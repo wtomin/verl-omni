@@ -344,18 +344,9 @@ class TrainingWorker(Worker, DistProfilerExtension):
             total_num_iterations = data.shape[0] // mini_batch_size_per_gpu * epochs
 
             for batch_idx, mini_batch_td in enumerate(dataloader):
-                # Per-sequence token counts for MFU (``FlopsCounter`` in ``_postprocess_output``).
-                # Batch layout depends on the dataloader / engine path:
-                #   - Packed remove-padding (NestedTensor): ``input_ids.offsets().diff()``.
-                #   - Dense padded batches (with attention mask): ``attention_mask.sum(-1)``.
+                # add global token num
                 if "input_ids" in mini_batch_td:
-                    input_ids = mini_batch_td["input_ids"]
-                    if hasattr(input_ids, "offsets"):
-                        global_token_num = input_ids.offsets().diff().tolist()  # (total_nnz,)
-                    elif "attention_mask" in mini_batch_td:
-                        global_token_num = mini_batch_td["attention_mask"].sum(dim=-1).reshape(-1).tolist()
-                    else:
-                        raise ValueError(f"input_ids has no offsets or attention_mask: {mini_batch_td}")
+                    global_token_num = mini_batch_td["input_ids"].offsets().diff().tolist()  # (total_nnz,)
                     # allgather from dp rank
                     global_token_num_output = [None] * torch.distributed.get_world_size(
                         self.engine.get_data_parallel_group()
@@ -383,14 +374,11 @@ class TrainingWorker(Worker, DistProfilerExtension):
                     for key, val in output.items():
                         # flattn dp and micro batch
                         if isinstance(val, list):
-                            flattened_val = list(chain.from_iterable(val)) if val and isinstance(val[0], list) else val
                             output[key] = (
-                                Metric.aggregate_dp(flattened_val)
-                                if flattened_val and isinstance(flattened_val[0], Metric)
-                                else flattened_val
+                                Metric.aggregate_dp(val)
+                                if isinstance(val[0], Metric)
+                                else list(chain.from_iterable(val))
                             )
-                        elif isinstance(val, Metric):
-                            output[key] = val.aggregate()
                     append_to_dict(metrics, output)
 
                 output = tu.get_tensordict(tensor_dict={}, non_tensor_dict={"metrics": metrics}).cpu()

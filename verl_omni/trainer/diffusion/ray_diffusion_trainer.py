@@ -141,6 +141,7 @@ class BaseRayDiffusionTrainer(ABC):
         val_dataset: Optional[Dataset] = None,
         collate_fn=None,
         train_sampler: Optional[Sampler] = None,
+        val_sampler: Optional[Sampler] = None,
         device_name=None,
     ):
         """
@@ -158,6 +159,7 @@ class BaseRayDiffusionTrainer(ABC):
             val_dataset (Optional[Dataset], optional): Validation dataset. Defaults to None.
             collate_fn: Function to collate data samples into batches.
             train_sampler (Optional[Sampler], optional): Sampler for the training dataset. Defaults to None.
+            val_sampler (Optional[Sampler], optional): Sampler for the validation dataset. Defaults to None.
             device_name (str, optional): Device name for training (e.g., "cuda", "cpu"). Defaults to None.
         """
 
@@ -193,11 +195,18 @@ class BaseRayDiffusionTrainer(ABC):
             lora_rank = config.actor_rollout_ref.model.get("lora_rank", 0)
         self.ref_in_actor = lora_rank > 0 or config.actor_rollout_ref.model.get("lora_adapter_path") is not None
 
-        self._create_dataloader(train_dataset, val_dataset, collate_fn, train_sampler)
+        self._create_dataloader(train_dataset, val_dataset, collate_fn, train_sampler, val_sampler)
 
         self.checkpoint_manager = None
 
-    def _create_dataloader(self, train_dataset, val_dataset, collate_fn, train_sampler: Optional[Sampler]):
+    def _create_dataloader(
+        self,
+        train_dataset,
+        val_dataset,
+        collate_fn,
+        train_sampler: Optional[Sampler],
+        val_sampler: Optional[Sampler] = None,
+    ):
         """
         Creates the train and validation dataloaders.
         """
@@ -223,7 +232,8 @@ class BaseRayDiffusionTrainer(ABC):
         self.train_dataset, self.val_dataset = train_dataset, val_dataset
 
         if train_sampler is None:
-            train_sampler = create_rl_sampler(self.config.data, self.train_dataset)
+            train_sampler_config = self.config.data.get("train_sampler", self.config.data.get("sampler", None))
+            train_sampler = create_rl_sampler(self.config.data, self.train_dataset, sampler_config=train_sampler_config)
         if collate_fn is None:
             collate_fn = get_collate_fn(self.config.data)
 
@@ -242,13 +252,19 @@ class BaseRayDiffusionTrainer(ABC):
         if val_batch_size is None:
             val_batch_size = len(self.val_dataset)
 
+        if val_sampler is None:
+            val_sampler_config = self.config.data.get("val_sampler", None)
+            if val_sampler_config is not None:
+                val_sampler = create_rl_sampler(self.config.data, self.val_dataset, sampler_config=val_sampler_config)
+
         self.val_dataloader = StatefulDataLoader(
             dataset=self.val_dataset,
             batch_size=val_batch_size,
             num_workers=num_workers,
-            shuffle=self.config.data.get("validation_shuffle", True),
+            shuffle=False if val_sampler is not None else self.config.data.get("validation_shuffle", True),
             drop_last=False,
             collate_fn=collate_fn,
+            sampler=val_sampler,
         )
 
         assert len(self.train_dataloader) >= 1, "Train dataloader is empty!"

@@ -20,9 +20,9 @@ Metrics:
         Pairwise win rate after reference adjustment. It is the fraction of
         pairs where the DPO reward for chosen is higher than rejected.
     dpo_reward.mean_margin:
-        Mean DPO reward gap,
-        (policy_logp(chosen) - reference_logp(chosen))
-        - (policy_logp(rejected) - reference_logp(rejected)).
+        Mean beta-scaled DPO reward gap,
+        beta * ((policy_logp(chosen) - reference_logp(chosen))
+        - (policy_logp(rejected) - reference_logp(rejected))).
 
 By default, log-probabilities are summed over answer tokens. Pass
 ``--average-log-prob`` to compare mean token log-probabilities instead, which is
@@ -57,6 +57,7 @@ import time
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import torch
@@ -66,13 +67,18 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from verl.utils import tensordict_utils as tu  # noqa: E402
+from verl.utils.dataset.dataset_utils import DatasetPadMode  # noqa: E402
+
 from verl_omni.pipelines.model_base import OmniModelBase  # noqa: E402
-from verl_omni.pipelines.utils import compute_omni_preference_logps, prepare_omni_preference_inputs  # noqa: E402
+from verl_omni.trainer.omni.omni_algos import OmniDPOLoss  # noqa: E402
 from verl_omni.utils.dataset.offline_mllm_dpo_dataset import (  # noqa: E402
     OfflineMLLMDPODataset,
     offline_mllm_dpo_collate_fn,
 )
 from verl_omni.utils.peft_utils import peft_adapters_disabled, set_peft_adapter  # noqa: E402
+from verl_omni.workers.config.omni import OmniLossConfig  # noqa: E402
+from verl_omni.workers.engine.fsdp.omni_impl import OmniFSDPEngine  # noqa: E402
 
 logger = logging.getLogger("qwen3_omni_dpo_validation")
 
@@ -117,17 +123,13 @@ class EvalModelConfig:
 @dataclass
 class RunningStats:
     total: int = 0
-    correct: int = 0
-    ties: int = 0
+    correct: float = 0.0
     margin_sum: float = 0.0
 
-    def update(self, margin: float) -> None:
-        self.total += 1
-        self.margin_sum += margin
-        if margin > 0:
-            self.correct += 1
-        elif margin == 0:
-            self.ties += 1
+    def update(self, *, reward_accuracy: float, reward_margin: float, count: int) -> None:
+        self.total += count
+        self.correct += reward_accuracy * count
+        self.margin_sum += reward_margin * count
 
     @property
     def accuracy(self) -> float:
@@ -140,8 +142,7 @@ class RunningStats:
     def to_dict(self) -> dict[str, float | int]:
         return {
             "total": self.total,
-            "correct": self.correct,
-            "ties": self.ties,
+            "correct": int(round(self.correct)),
             "accuracy": self.accuracy,
             "mean_margin": self.mean_margin,
         }
@@ -149,9 +150,19 @@ class RunningStats:
 
 @dataclass
 class PreferenceScores:
+    model_output: dict[str, Any]
     chosen_logps: torch.Tensor
     rejected_logps: torch.Tensor
     label_token_counts: torch.Tensor
+
+
+@dataclass
+class ValidationScorer:
+    """Small shim that reuses OmniFSDPEngine forward input/output processing."""
+
+    engine: OmniFSDPEngine
+    dpo_loss: OmniDPOLoss
+    dpo_config: Any
 
 
 def parse_args() -> argparse.Namespace:
@@ -205,6 +216,47 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Use mean token logprob instead of sum logprob.",
     )
+    parser.add_argument("--dpo-beta", type=float, default=0.1, help="DPO beta used by OmniDPOLoss reward metrics.")
+    parser.add_argument(
+        "--dpo-label-smoothing",
+        type=float,
+        default=0.0,
+        help="DPO label smoothing passed to OmniDPOLoss.",
+    )
+    parser.add_argument(
+        "--dpo-loss-type",
+        default="sigmoid",
+        choices=["sigmoid", "ipo"],
+        help="DPO loss type passed to OmniDPOLoss.",
+    )
+    parser.add_argument(
+        "--save-generations",
+        action="store_true",
+        help="Generate an answer from each validation prompt and save it in the output JSONL.",
+    )
+    parser.add_argument(
+        "--generation-max-new-tokens",
+        type=int,
+        default=256,
+        help="Maximum new tokens for --save-generations.",
+    )
+    parser.add_argument(
+        "--generation-do-sample",
+        action="store_true",
+        help="Use sampling for --save-generations; otherwise greedy decoding is used.",
+    )
+    parser.add_argument(
+        "--generation-temperature",
+        type=float,
+        default=1.0,
+        help="Sampling temperature for --save-generations when --generation-do-sample is set.",
+    )
+    parser.add_argument(
+        "--generation-top-p",
+        type=float,
+        default=1.0,
+        help="Nucleus sampling top-p for --save-generations when --generation-do-sample is set.",
+    )
     parser.add_argument(
         "--exclude-modules",
         default=DEFAULT_EXCLUDE_MODULES,
@@ -217,7 +269,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--prompt-key", default="prompt")
     parser.add_argument("--chosen-key", default="chosen")
     parser.add_argument("--rejected-key", default="rejected")
-    parser.add_argument("--source-name-key", default="data_source")
     parser.add_argument(
         "--mm-configs",
         default=None,
@@ -313,34 +364,207 @@ def maybe_unfuse_qwen3_omni_experts(model, external_lib: str | None) -> None:
             logger.info("External lib %s unfused %d thinker expert module(s)", module_name, converted)
 
 
-def score_preference_batch(
+def move_to_device(value: Any, device: str | torch.device) -> Any:
+    if isinstance(value, torch.Tensor):
+        return value.to(device)
+    if isinstance(value, dict):
+        return {key: move_to_device(item, device) for key, item in value.items()}
+    if isinstance(value, list):
+        return [move_to_device(item, device) for item in value]
+    if isinstance(value, tuple):
+        return tuple(move_to_device(item, device) for item in value)
+    return value
+
+
+def cast_floating_model_inputs(model_inputs: dict[str, Any], dtype: torch.dtype) -> None:
+    for key in ("pixel_values", "pixel_values_videos", "input_features"):
+        value = model_inputs.get(key)
+        if isinstance(value, torch.Tensor) and torch.is_floating_point(value):
+            model_inputs[key] = value.to(dtype=dtype)
+
+
+def build_validation_scorer(args: argparse.Namespace, model) -> ValidationScorer:
+    engine = object.__new__(OmniFSDPEngine)
+    engine.module = model
+    engine.use_ulysses_sp = False
+    engine.ulysses_sequence_parallel_size = 1
+    engine.engine_config = SimpleNamespace(entropy_checkpointing=False)
+    dpo_config = SimpleNamespace(
+        omni_loss=OmniLossConfig(
+            beta=args.dpo_beta,
+            label_smoothing=args.dpo_label_smoothing,
+            loss_type=args.dpo_loss_type,
+            average_log_prob=args.average_log_prob,
+        )
+    )
+    return ValidationScorer(engine=engine, dpo_loss=OmniDPOLoss(), dpo_config=dpo_config)
+
+
+def validation_micro_batch(batch: dict[str, Any], device: str | torch.device) -> Any:
+    tensor_dict = {
+        key: move_to_device(value, device)
+        for key, value in batch.items()
+        if isinstance(value, torch.Tensor) or key == "multi_modal_inputs"
+    }
+    input_ids = tensor_dict["input_ids"]
+    tensor_dict["temperature"] = torch.ones(input_ids.shape[0], device=device, dtype=torch.float32)
+    micro_batch = tu.get_tensordict(tensor_dict=tensor_dict)
+    tu.assign_non_tensor(
+        micro_batch,
+        use_remove_padding=True,
+        pad_mode=DatasetPadMode.NO_PADDING,
+        use_fused_kernels=False,
+        calculate_entropy=False,
+        calculate_sum_pi_squared=False,
+        distillation_use_topk=False,
+    )
+    return micro_batch
+
+
+def label_token_counts(labels: torch.Tensor) -> torch.Tensor:
+    if labels.is_nested:
+        return torch.stack([(row != -100).sum() for row in labels.unbind()])
+    return (labels != -100).sum(dim=-1)
+
+
+def score_preference_batch(*, model, scorer: ValidationScorer, micro_batch: Any) -> PreferenceScores:
+    model_inputs, output_args = scorer.engine.prepare_model_inputs(micro_batch=micro_batch)
+    cast_floating_model_inputs(model_inputs, next(model.parameters()).dtype)
+    outputs = model(**model_inputs, use_cache=False)
+    model_output = scorer.engine.prepare_model_outputs(
+        output=outputs,
+        output_args=output_args,
+        micro_batch=micro_batch,
+        logits_processor_func=None,
+    )
+    seq_logps = scorer.dpo_loss._sequence_logps_from_token_log_probs(
+        name="log_probs",
+        log_probs=model_output["log_probs"],
+        labels=micro_batch["labels"],
+        average_log_prob=scorer.dpo_config.omni_loss.average_log_prob,
+    )
+    return PreferenceScores(
+        model_output=model_output,
+        chosen_logps=seq_logps[0::2],
+        rejected_logps=seq_logps[1::2],
+        label_token_counts=label_token_counts(micro_batch["labels"]),
+    )
+
+
+def compute_dpo_loss_metrics(
+    *,
+    scorer: ValidationScorer,
+    policy_output: dict[str, Any],
+    reference_output: dict[str, Any],
+    micro_batch: Any,
+) -> dict[str, torch.Tensor]:
+    loss_data = micro_batch.clone()
+    loss_data["ref_log_prob"] = reference_output["log_probs"].detach()
+    result = scorer.dpo_loss(config=scorer.dpo_config, model_output=policy_output, data=loss_data)
+    return result.metrics
+
+
+def branch_value(value: Any, branch_index: int = 0) -> Any:
+    if isinstance(value, dict):
+        return {key: branch_value(item, branch_index) for key, item in value.items()}
+    if isinstance(value, list) and len(value) == 2:
+        return value[branch_index]
+    return value
+
+
+def first_response_token_index(labels: torch.Tensor) -> int:
+    response_positions = torch.nonzero(labels != -100, as_tuple=False)
+    if response_positions.numel() == 0:
+        return int(labels.shape[-1])
+    return int(response_positions[0].item())
+
+
+def truncate_last_dim(value: torch.Tensor, length: int) -> torch.Tensor:
+    return value[..., :length].contiguous()
+
+
+def build_generation_inputs(
+    feature: dict[str, Any],
+    *,
+    device: str | torch.device,
+    dtype: torch.dtype,
+) -> tuple[dict[str, Any], int]:
+    branch = branch_value(feature, branch_index=0)
+    labels = branch.get("labels")
+    input_ids = branch.get("input_ids")
+    if not isinstance(labels, torch.Tensor) or not isinstance(input_ids, torch.Tensor):
+        raise ValueError("Generation requires tensor input_ids and labels in the validation feature.")
+
+    prompt_len = first_response_token_index(labels)
+    if prompt_len <= 0:
+        raise ValueError("Cannot build generation prompt from an empty validation prompt prefix.")
+
+    model_inputs: dict[str, Any] = {
+        "input_ids": truncate_last_dim(input_ids, prompt_len).unsqueeze(0),
+    }
+    attention_mask = branch.get("attention_mask")
+    if isinstance(attention_mask, torch.Tensor):
+        model_inputs["attention_mask"] = truncate_last_dim(attention_mask, prompt_len).unsqueeze(0)
+
+    position_ids = branch.get("position_ids")
+    if isinstance(position_ids, torch.Tensor):
+        position_ids = truncate_last_dim(position_ids, prompt_len)
+        if position_ids.dim() == 1:
+            position_ids = position_ids.unsqueeze(0)
+        elif position_ids.dim() == 2:
+            position_ids = position_ids.unsqueeze(1)
+        model_inputs["position_ids"] = position_ids
+
+    multi_modal_inputs = branch.get("multi_modal_inputs")
+    if isinstance(multi_modal_inputs, dict):
+        model_inputs.update(multi_modal_inputs)
+
+    model_inputs = move_to_device(model_inputs, device)
+    cast_floating_model_inputs(model_inputs, dtype)
+    return model_inputs, prompt_len
+
+
+def generation_kwargs(args: argparse.Namespace, tokenizer) -> dict[str, Any]:
+    kwargs: dict[str, Any] = {
+        "max_new_tokens": args.generation_max_new_tokens,
+        "do_sample": args.generation_do_sample,
+    }
+    if args.generation_do_sample:
+        kwargs["temperature"] = args.generation_temperature
+        kwargs["top_p"] = args.generation_top_p
+    eos_token_id = getattr(tokenizer, "eos_token_id", None)
+    pad_token_id = getattr(tokenizer, "pad_token_id", None) or eos_token_id
+    if eos_token_id is not None:
+        kwargs["eos_token_id"] = eos_token_id
+    if pad_token_id is not None:
+        kwargs["pad_token_id"] = pad_token_id
+    return kwargs
+
+
+def generate_validation_answers(
     *,
     model,
-    model_config,
-    model_batch: dict[str, Any],
-    input_device: torch.device,
-    average_log_prob: bool,
-) -> PreferenceScores:
-    model_inputs, labels, segment_ranges = prepare_omni_preference_inputs(
-        model_config,
-        model_batch,
-        dtype=next(model.parameters()).dtype,
-    )
-    outputs = model(**model_inputs, use_cache=False)
-    logits = outputs.logits if hasattr(outputs, "logits") else outputs[0]
-    chosen_logps, rejected_logps = compute_omni_preference_logps(
-        model_config,
-        logits,
-        labels,
-        segment_ranges,
-        average_log_prob=average_log_prob,
-    )
-    label_token_counts = (labels != -100).sum(dim=-1).detach().to(input_device)
-    return PreferenceScores(
-        chosen_logps=chosen_logps,
-        rejected_logps=rejected_logps,
-        label_token_counts=label_token_counts,
-    )
+    tokenizer,
+    features: list[dict[str, Any]],
+    args: argparse.Namespace,
+    device: str | torch.device,
+) -> list[dict[str, Any]]:
+    dtype = next(model.parameters()).dtype
+    kwargs = generation_kwargs(args, tokenizer)
+    generations = []
+    for feature in features:
+        model_inputs, prompt_len = build_generation_inputs(feature, device=device, dtype=dtype)
+        generated_ids = model.generate(**model_inputs, **kwargs)
+        sequences = generated_ids.sequences if hasattr(generated_ids, "sequences") else generated_ids
+        sequence = sequences[0]
+        new_tokens = sequence[prompt_len:] if sequence.shape[-1] >= prompt_len else sequence
+        generations.append(
+            {
+                "generated_text": tokenizer.decode(new_tokens, skip_special_tokens=True),
+                "generated_token_count": int(new_tokens.numel()),
+            }
+        )
+    return generations
 
 
 def load_lora_adapter_weights(
@@ -514,7 +738,6 @@ def build_dataset(args: argparse.Namespace, processor, data_files: list[str] | N
             "prompt_key": args.prompt_key,
             "chosen_key": args.chosen_key,
             "rejected_key": args.rejected_key,
-            "source_name_key": args.source_name_key,
             "base_transform": "qwen3_omni_moe",
             "data_source": "offline_mllm_dpo",
             "mm_configs": mm_configs,
@@ -545,17 +768,20 @@ def iter_modality_batches(dataset: OfflineMLLMDPODataset, batch_size: int):
             yield modality, indices[start : start + batch_size]
 
 
-def tensor_batch_only(batch: dict[str, Any], device: str | torch.device, average_log_prob: bool) -> dict[str, Any]:
-    model_batch = {key: value.to(device) for key, value in batch.items() if isinstance(value, torch.Tensor)}
-    model_batch["average_log_prob"] = average_log_prob
-    return model_batch
-
-
 def safe_json_value(value: Any) -> Any:
+    if value.__class__.__name__ == "NonTensorData":
+        return safe_json_value(value.data)
+    if isinstance(value, torch.Tensor):
+        value = value.detach().cpu()
+        return value.item() if value.numel() == 1 else value.tolist()
     if hasattr(value, "item"):
         return value.item()
     if isinstance(value, bytes):
         return value.decode("utf-8")
+    if isinstance(value, dict):
+        return {key: safe_json_value(item) for key, item in value.items()}
+    if isinstance(value, list | tuple):
+        return [safe_json_value(item) for item in value]
     return value
 
 
@@ -566,7 +792,7 @@ def write_results(output_jsonl: str | None, rows: list[dict[str, Any]]) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with output_path.open("a", encoding="utf-8") as f:
         for row in rows:
-            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+            f.write(json.dumps(safe_json_value(row), ensure_ascii=False) + "\n")
 
 
 def modality_counts(dataset: OfflineMLLMDPODataset) -> dict[str, int]:
@@ -587,7 +813,7 @@ def main() -> None:
     logger.info("Starting Qwen3-Omni offline DPO LoRA validation")
     logger.info(
         "Config: model=%s adapter=%s batch_size=%d max_samples=%d device=%s device_map=%s "
-        "average_log_prob=%s output_jsonl=%s",
+        "average_log_prob=%s dpo_beta=%.4f dpo_loss_type=%s save_generations=%s output_jsonl=%s",
         args.model_path,
         args.adapter_path,
         args.batch_size,
@@ -595,9 +821,13 @@ def main() -> None:
         args.device,
         args.device_map or "none",
         args.average_log_prob,
+        args.dpo_beta,
+        args.dpo_loss_type,
+        args.save_generations,
         args.output_jsonl,
     )
-    model, _tokenizer, processor, model_config, adapter_path, input_device = load_qwen3_omni_lora_model(args)
+    model, tokenizer, processor, _model_config, adapter_path, input_device = load_qwen3_omni_lora_model(args)
+    scorer = build_validation_scorer(args, model)
     datasets = []
     counts: dict[str, int] = defaultdict(int)
     total_batches = 0
@@ -620,6 +850,8 @@ def main() -> None:
             logger.info("Removing existing output JSONL: %s", output_path)
             output_path.unlink()
         logger.info("Per-sample results will be written to %s", output_path)
+    elif args.save_generations:
+        logger.warning("--save-generations was set but --output-jsonl is empty; generated text will not be saved.")
 
     dpo_stats = RunningStats()
     dpo_stats_by_modality: dict[str, RunningStats] = defaultdict(RunningStats)
@@ -645,23 +877,36 @@ def main() -> None:
                 )
                 features = [dataset[index] for index in indices]
                 batch = offline_mllm_dpo_collate_fn(features)
-                model_batch = tensor_batch_only(batch, input_device, args.average_log_prob)
+                micro_batch = validation_micro_batch(batch, input_device)
                 logger.debug("Building preference model inputs for batch %d/%d", batch_count + 1, total_batches)
-                policy_scores = score_preference_batch(
-                    model=model,
-                    model_config=model_config,
-                    model_batch=model_batch,
-                    input_device=input_device,
-                    average_log_prob=args.average_log_prob,
-                )
+                policy_scores = score_preference_batch(model=model, scorer=scorer, micro_batch=micro_batch)
                 with peft_adapters_disabled(model):
-                    reference_scores = score_preference_batch(
+                    reference_scores = score_preference_batch(model=model, scorer=scorer, micro_batch=micro_batch)
+                dpo_metrics = compute_dpo_loss_metrics(
+                    scorer=scorer,
+                    policy_output=policy_scores.model_output,
+                    reference_output=reference_scores.model_output,
+                    micro_batch=micro_batch,
+                )
+                batch_accuracy = float(dpo_metrics["reward_accuracy"].detach().cpu())
+                batch_margin = float(dpo_metrics["reward_margin"].detach().cpu())
+                dpo_stats.update(reward_accuracy=batch_accuracy, reward_margin=batch_margin, count=len(indices))
+                dpo_stats_by_modality[modality].update(
+                    reward_accuracy=batch_accuracy,
+                    reward_margin=batch_margin,
+                    count=len(indices),
+                )
+                generation_rows = (
+                    generate_validation_answers(
                         model=model,
-                        model_config=model_config,
-                        model_batch=model_batch,
-                        input_device=input_device,
-                        average_log_prob=args.average_log_prob,
+                        tokenizer=tokenizer,
+                        features=features,
+                        args=args,
+                        device=input_device,
                     )
+                    if args.save_generations
+                    else [{} for _ in indices]
+                )
 
                 result_rows = []
                 for offset, index in enumerate(indices):
@@ -669,34 +914,39 @@ def main() -> None:
                     rejected = float(policy_scores.rejected_logps[offset].detach().cpu())
                     ref_chosen = float(reference_scores.chosen_logps[offset].detach().cpu())
                     ref_rejected = float(reference_scores.rejected_logps[offset].detach().cpu())
-                    chosen_reward = chosen - ref_chosen
-                    rejected_reward = rejected - ref_rejected
+                    chosen_reward = args.dpo_beta * (chosen - ref_chosen)
+                    rejected_reward = args.dpo_beta * (rejected - ref_rejected)
                     dpo_margin = chosen_reward - rejected_reward
-                    dpo_stats.update(dpo_margin)
-                    dpo_stats_by_modality[modality].update(dpo_margin)
-                    result_rows.append(
-                        {
-                            "data_file": data_file,
-                            "index": int(index),
-                            "uid": safe_json_value(batch.get("uid", [None])[offset]),
-                            "modality": modality,
-                            "policy_chosen_logp": chosen,
-                            "policy_rejected_logp": rejected,
-                            "reference_chosen_logp": ref_chosen,
-                            "reference_rejected_logp": ref_rejected,
-                            "chosen_reward": chosen_reward,
-                            "rejected_reward": rejected_reward,
-                            "dpo_margin": dpo_margin,
-                            "dpo_correct": dpo_margin > 0,
-                            "chosen_label_tokens": int(policy_scores.label_token_counts[offset * 2].detach().cpu()),
-                            "rejected_label_tokens": int(
-                                policy_scores.label_token_counts[offset * 2 + 1].detach().cpu()
-                            ),
-                        }
-                    )
+                    row = {
+                        "data_file": data_file,
+                        "index": int(index),
+                        "uid": safe_json_value(batch.get("uid", [None])[offset]),
+                        "modality": modality,
+                        "policy_chosen_logp": chosen,
+                        "policy_rejected_logp": rejected,
+                        "reference_chosen_logp": ref_chosen,
+                        "reference_rejected_logp": ref_rejected,
+                        "chosen_reward": chosen_reward,
+                        "rejected_reward": rejected_reward,
+                        "dpo_margin": dpo_margin,
+                        "dpo_correct": dpo_margin > 0,
+                        "chosen_label_tokens": int(policy_scores.label_token_counts[offset * 2].detach().cpu()),
+                        "rejected_label_tokens": int(policy_scores.label_token_counts[offset * 2 + 1].detach().cpu()),
+                    }
+                    row.update(generation_rows[offset])
+                    result_rows.append(row)
                 write_results(args.output_jsonl, result_rows)
 
-                del features, batch, model_batch, policy_scores, reference_scores, result_rows
+                del (
+                    features,
+                    batch,
+                    micro_batch,
+                    policy_scores,
+                    reference_scores,
+                    dpo_metrics,
+                    generation_rows,
+                    result_rows,
+                )
                 if input_device.type == "cuda":
                     torch.cuda.empty_cache()
 

@@ -22,7 +22,8 @@
 # Override via env: NUM_GPUS, MODEL_PATH, DATA_DIR, TRAIN_SIZE, VAL_SIZE,
 # TOTAL_TRAINING_STEPS, PPO_MINI_BATCH_SIZE, PPO_MICRO_BATCH_SIZE_PER_GPU,
 # LORA_RANK, LORA_ALPHA, LORA_TARGET_MODULES, QWEN3_OMNI_EXTERNAL_LIB,
-# IMAGE_RATIO, VIDEO_RATIO, AUDIO_RATIO
+# IMAGE_RATIO, VIDEO_RATIO, AUDIO_RATIO, VAL_BATCH_SIZE, TEST_FREQ, VALIDATION_OUTPUT_JSONL,
+# GENERATION_MAX_NEW_TOKENS
 set -xeuo pipefail
 
 export NCCL_IB_DISABLE=1
@@ -34,7 +35,7 @@ export VERL_USE_EXTERNAL_MODULES=${VERL_USE_EXTERNAL_MODULES:-${QWEN3_OMNI_EXTER
 NUM_GPUS=${NUM_GPUS:-2}
 MODEL_PATH=${MODEL_PATH:-}
 DATA_DIR=${DATA_DIR:-${HOME}/data/dummy_omni_preference_dpo}
-TRAIN_SIZE=${TRAIN_SIZE:-2}
+TRAIN_SIZE=${TRAIN_SIZE:-8}
 VAL_SIZE=${VAL_SIZE:-1}
 TOTAL_TRAINING_STEPS=${TOTAL_TRAINING_STEPS:-2}
 PPO_MINI_BATCH_SIZE=${PPO_MINI_BATCH_SIZE:-2}
@@ -44,7 +45,9 @@ LORA_ALPHA=${LORA_ALPHA:-16}
 # The expert-only external lib unfuses MoE experts before PEFT attaches LoRA,
 # so target the resulting nn.Linear modules instead of fused target_parameters.
 LORA_TARGET_MODULES=${LORA_TARGET_MODULES:-'["q_proj","k_proj","v_proj","o_proj","gate_proj","up_proj","down_proj"]'}
-TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE:-2}
+TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE:-4}
+VAL_BATCH_SIZE=${VAL_BATCH_SIZE:-1}
+TEST_FREQ=${TEST_FREQ:-1}
 ATTN_IMPLEMENTATION=${ATTN_IMPLEMENTATION:-sdpa}
 IMAGE_RATIO=${IMAGE_RATIO:-1.0}
 VIDEO_RATIO=${VIDEO_RATIO:-1.0}
@@ -57,6 +60,8 @@ PROJECT_NAME=verl-test
 EXPERIMENT_NAME=qwen3-omni-multimodal-offline-mllm-dpo-lora-smoke
 CHECKPOINT_DIR="${REPO_ROOT}/checkpoints/${PROJECT_NAME}/${EXPERIMENT_NAME}"
 ADAPTER_PATH="${CHECKPOINT_DIR}/global_step_${TOTAL_TRAINING_STEPS}/actor"
+VALIDATION_OUTPUT_JSONL=${VALIDATION_OUTPUT_JSONL:-${CHECKPOINT_DIR}/validation_generations.jsonl}
+GENERATION_MAX_NEW_TOKENS=${GENERATION_MAX_NEW_TOKENS:-16}
 
 # Thinker-only LoRA: strip talker / code2wav / vision tower / audio tower.
 EXCLUDE_MODULES=".*talker.*|.*code2wav.*|.*code_predictor.*|.*visual.*|.*audio_tower.*"
@@ -94,15 +99,20 @@ python3 -m verl_omni.trainer.main_omni \
     data.train_files="${TRAIN_FILES}" \
     data.val_files="${VAL_FILES}" \
     data.train_batch_size="${TRAIN_BATCH_SIZE}" \
+    data.val_batch_size="${VAL_BATCH_SIZE}" \
     data.max_prompt_length=512 \
     data.trust_remote_code=true \
     data.filter_overlong_prompts=false \
+    +data.pad_mode=no_padding \
     data.custom_cls.path=pkg://verl_omni.utils.dataset.offline_mllm_dpo_dataset \
     data.custom_cls.name=OfflineMLLMDPODataset \
     data.custom_cls.collate_fn=offline_mllm_dpo_collate_fn \
-    data.sampler.class_path=pkg://verl_omni.utils.dataset.offline_mllm_dpo_dataset \
-    data.sampler.class_name=ModalityGroupedBatchSampler \
-    +data.sampler.sampler_kwargs="{batch_size:${TRAIN_BATCH_SIZE},drop_last:true,modality_sample_weights:{image:${IMAGE_RATIO},video:${VIDEO_RATIO},audio:${AUDIO_RATIO}}}" \
+    +data.train_sampler.class_path=pkg://verl_omni.utils.dataset.offline_mllm_dpo_dataset \
+    +data.train_sampler.class_name=ModalityGroupedBatchSampler \
+    +data.train_sampler.sampler_kwargs="{batch_size:${TRAIN_BATCH_SIZE},drop_last:true,modality_sample_weights:{image:${IMAGE_RATIO},video:${VIDEO_RATIO},audio:${AUDIO_RATIO}}}" \
+    +data.val_sampler.class_path=pkg://verl_omni.utils.dataset.offline_mllm_dpo_dataset \
+    +data.val_sampler.class_name=ModalityGroupedBatchSampler \
+    +data.val_sampler.sampler_kwargs="{batch_size:${VAL_BATCH_SIZE},shuffle:false,drop_last:false,replacement:false}" \
     +data.mm_configs="{scale_factor:28,image_min_pixels:3136,image_max_pixels:602112,video_min_pixels:3136,video_max_pixels:602112,max_ratio:200,min_frames:2,max_frames:4,frame_factor:2,sample_rate:16000,fps:2.0,use_audio_in_video:false}" \
     actor_rollout_ref.model.path="${MODEL_PATH}" \
     actor_rollout_ref.model.hf_config_path="${MODEL_PATH}" \
@@ -116,7 +126,7 @@ python3 -m verl_omni.trainer.main_omni \
     actor_rollout_ref.model.lora_alpha="${LORA_ALPHA}" \
     actor_rollout_ref.model.target_modules="${LORA_TARGET_MODULES}" \
     actor_rollout_ref.model.exclude_modules="${EXCLUDE_MODULES}" \
-    actor_rollout_ref.model.use_remove_padding=false \
+    actor_rollout_ref.model.use_remove_padding=true \
     actor_rollout_ref.actor.trainer_type=direct_preference \
     actor_rollout_ref.actor.omni_loss.loss_mode=dpo \
     actor_rollout_ref.actor.omni_loss.beta=0.1 \
@@ -142,7 +152,7 @@ python3 -m verl_omni.trainer.main_omni \
     trainer.experiment_name="${EXPERIMENT_NAME}" \
     trainer.default_local_dir="${CHECKPOINT_DIR}" \
     trainer.val_before_train=false \
-    trainer.test_freq=-1 \
+    trainer.test_freq="${TEST_FREQ}" \
     trainer.save_freq=1 \
     trainer.n_gpus_per_node="${NUM_GPUS}" \
     trainer.nnodes=1 \
@@ -167,6 +177,12 @@ python3 "${REPO_ROOT}/examples/dpo_trainer/qwen3_omni/validate_offline_dpo_lora.
     --dtype bfloat16 \
     --attn-implementation "${ATTN_IMPLEMENTATION}" \
     --external-lib "${QWEN3_OMNI_EXTERNAL_LIB}" \
+    --dpo-beta 0.1 \
+    --output-jsonl "${VALIDATION_OUTPUT_JSONL}" \
+    --save-generations \
+    --generation-max-new-tokens "${GENERATION_MAX_NEW_TOKENS}" \
     --log-level INFO
+
+echo "Saved validation generation JSONL to ${VALIDATION_OUTPUT_JSONL}"
 
 echo "Qwen3-Omni multimodal offline MLLM DPO + LoRA smoke test passed (train + validate)."

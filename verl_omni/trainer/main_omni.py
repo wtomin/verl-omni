@@ -228,7 +228,14 @@ class RayTrainerTaskRunner:
             is_train=False,
             max_samples=config.data.get("val_max_samples", -1),
         )
-        train_sampler = create_rl_sampler(config.data, train_dataset)
+        train_sampler_config = config.data.get("train_sampler", config.data.get("sampler", None))
+        train_sampler = create_rl_sampler(config.data, train_dataset, sampler_config=train_sampler_config)
+        val_sampler_config = config.data.get("val_sampler", None)
+        val_sampler = (
+            create_rl_sampler(config.data, val_dataset, sampler_config=val_sampler_config)
+            if val_sampler_config is not None
+            else None
+        )
 
         trainer_cls = self.get_trainer_cls(config)
         trainer = trainer_cls(
@@ -242,6 +249,7 @@ class RayTrainerTaskRunner:
             val_dataset=val_dataset,
             collate_fn=collate_fn,
             train_sampler=train_sampler,
+            val_sampler=val_sampler,
         )
         trainer.init_workers()
         trainer.fit()
