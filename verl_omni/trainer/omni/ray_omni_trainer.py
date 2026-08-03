@@ -125,12 +125,14 @@ class OmniDirectPreferenceRayTrainer(DirectPreferenceRayTrainer):
         return DataProto.from_tensordict(data)
 
     def _omni_dpo_meta_info(self, *, global_batch_size: int | None = None) -> dict:
+        if global_batch_size is None:
+            global_batch_size = self.global_batch_size
         micro_batch_size_per_gpu = self.config.data.get("micro_batch_size_per_gpu", None)
         if micro_batch_size_per_gpu is None:
             micro_batch_size_per_gpu = self.config.actor_rollout_ref.actor.get("ppo_micro_batch_size_per_gpu", None)
+        if self.config.algorithm.get("paired_preference", False) and micro_batch_size_per_gpu is not None:
+            micro_batch_size_per_gpu = min(micro_batch_size_per_gpu, global_batch_size)
         micro_batch_size_per_gpu = self._expanded_preference_batch_size(micro_batch_size_per_gpu)
-        if global_batch_size is None:
-            global_batch_size = self.global_batch_size
         return {
             "use_remove_padding": self.config.actor_rollout_ref.model.get("use_remove_padding", True),
             "use_dynamic_bsz": self.config.data.get("use_dynamic_bsz", False),
@@ -147,6 +149,20 @@ class OmniDirectPreferenceRayTrainer(DirectPreferenceRayTrainer):
             return None
         paired = self.config.algorithm.get("paired_preference", False)
         return batch_size * 2 if paired else batch_size * self.config.actor_rollout_ref.rollout.n
+
+    def _logical_preference_batch_size(self, batch_dict: dict) -> int:
+        batch_value = batch_dict.get("input_ids")
+        if batch_value is None:
+            batch_value = batch_dict.get("labels")
+        if batch_value is None:
+            raise KeyError("Omni DPO batch must contain `input_ids` or `labels` to infer batch size.")
+        expanded_batch_size = len(batch_value)
+        if self.config.algorithm.get("paired_preference", False):
+            if expanded_batch_size % 2 != 0:
+                raise ValueError("Omni DPO validation batch must contain adjacent chosen/rejected rows.")
+            return expanded_batch_size // 2
+        rollout_n = self.config.actor_rollout_ref.rollout.n
+        return expanded_batch_size // rollout_n
 
     def _infer_reference_policy(self, batch: DataProto) -> Optional[DataProto]:
         """Compute reference-policy log-probs for batch."""
@@ -192,8 +208,6 @@ class OmniDirectPreferenceRayTrainer(DirectPreferenceRayTrainer):
             return super()._validate()
 
         val_dataloader = self.val_dataloader
-        batch_size = self.config.data.val_batch_size
-        meta_info = self._omni_dpo_meta_info(global_batch_size=batch_size)
         loss_fn = self._loss_fn
         metric_keys = ("dpo_loss", "reward_accuracy", "reward_margin", "chosen_rewards", "rejected_rewards")
         metric_aggregator = GroupedMetricMean(metric_keys=metric_keys, group_attribute="modality")
@@ -201,6 +215,8 @@ class OmniDirectPreferenceRayTrainer(DirectPreferenceRayTrainer):
         with torch.no_grad():
             for batch_dict in val_dataloader:
                 modality = get_batch_modality(batch_dict)
+                logical_batch_size = self._logical_preference_batch_size(batch_dict)
+                meta_info = self._omni_dpo_meta_info(global_batch_size=logical_batch_size)
                 batch = self._batch_dict_to_dataproto(batch_dict, meta_info)
 
                 ref_infer_res = self._infer_reference_policy(batch)
