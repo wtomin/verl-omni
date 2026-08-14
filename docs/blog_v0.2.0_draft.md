@@ -113,7 +113,7 @@ The best single recipe to highlight is **MMK12**. It exercises the new stable Qw
       alt="MMK12 training rollout_actor_probs_pearson_corr"
       width="100%"
     />
-    <p><em>MMK12 actor-rollout probability correlation during training.</em></p>
+    <p style="margin-top: 8px; text-align: center;"><em>MMK12 actor-rollout probability correlation during training.</em></p>
   </div>
   <div style="width: 45%; text-align: center;">
     <img
@@ -121,7 +121,7 @@ The best single recipe to highlight is **MMK12**. It exercises the new stable Qw
       alt="MMK12 rollout_corr/log_ppl_diff"
       width="100%"
     />
-    <p><em>MMK12 rollout and actor log-prob consistency during training.</em></p>
+    <p style="margin-top: 8px; text-align: center;"><em>MMK12 rollout and actor log-prob consistency during training.</em></p>
   </div>
 </div>
 
