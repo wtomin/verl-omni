@@ -30,7 +30,7 @@ The faster diffusion RL work has two main features.
 
 Faster rollout only matters if the generated trajectories and log-probs still describe the same policy. This release fixes several correctness-sensitive areas: request-batched diffusion log-probs, async rollout semantics, rollout correction, and rank-local LoRA weight-update routes. Rollout correction also pays back in step time: bypass mode can skip actor old-log-prob recomputation. 
 
-### Current Repository Support
+### Newly Support
 
 The [rollout batching guide](https://verl-omni.readthedocs.io/en/latest/start/rollout_batching.html) explains both diffusion batching modes, how to enable them, and when to choose each mode. Current faster diffusion RL support is organized around these recipes:
 
@@ -147,7 +147,7 @@ One lever is the `verl` V1 trainer architecture. Omni recipes get clearer worker
 
 The other is the reusable omni model adapter layer. Instead of wiring each architecture as a one-off path, the trainer can rely on a shared interface for model setup, processor setup, trainable-stage selection, FSDP preparation, and rollout alignment.
 
-### Current Repository Support
+### Newly Support
 
 The current Qwen3-Omni adapter supports thinker-only training by redirecting training to the target component, stripping unused modules such as Talker and codec-related components, and working with FSDP/FSDP2 wrapping. Current stable omni training support is organized around these recipes:
 
