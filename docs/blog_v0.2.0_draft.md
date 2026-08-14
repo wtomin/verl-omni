@@ -1,6 +1,6 @@
 # VeRL-Omni v0.2.0: Faster Diffusion RL and Stable Omni Training
 
-> Estimated reading time: 8 minutes.
+> Estimated reading time: 10 minutes.
 > Focus areas: faster diffusion RL and stable omni training.
 
 VeRL-Omni `v0.2.0` establishes a stronger foundation for production-grade omni-modal reinforcement learning. This release improves the training stack across rollout performance, model integration, reward support, hardware coverage, and documentation, with two changes carrying the most impact:
@@ -28,40 +28,109 @@ The faster diffusion RL work has two main features.
 
 - The trainer path matters just as much. Diffusion now has a V1 trainer path, bringing diffusion RL closer to the modern trainer architecture used elsewhere in VeRL-Omni and laying the groundwork for decoupled rollout and training execution.
 
-Faster rollout only matters if the generated trajectories and log-probs still describe the same policy. This release fixes several correctness-sensitive areas: request-batched diffusion log-probs, async rollout semantics, and rank-local LoRA weight-update routes. These details are the rails that keep high-throughput rollout trainable.
+Faster rollout only matters if the generated trajectories and log-probs still describe the same policy. This release fixes several correctness-sensitive areas: request-batched diffusion log-probs, async rollout semantics, rollout correction, and rank-local LoRA weight-update routes. Rollout correction also pays back in step time: bypass mode can skip actor old-log-prob recomputation. 
 
 ### Current Repository Support
 
-The [rollout batching guide](https://verl-omni.readthedocs.io/en/latest/start/rollout_batching.html) backs up the rollout story. It explains both diffusion batching modes, how to enable them, and when to choose each mode. It also reports request-level batching gains:
+The [rollout batching guide](https://verl-omni.readthedocs.io/en/latest/start/rollout_batching.html) explains both diffusion batching modes, how to enable them, and when to choose each mode. Current faster diffusion RL support is organized around these recipes:
 
-- Qwen-Image LoRA, 32 prompts × 16 responses, 512 px, `max_num_seqs=32`: generation time drops from `226.4s` to `107.9s`, a `52%` reduction.
-- SD3.5 LoRA, 8 prompts × 8 responses, 384 px, `max_num_seqs=256`: generation time drops from `25.4s` to `22.3s`, a `12%` reduction.
-
-On the trainer side, diffusion V1 support currently focuses on SD3.5 FlowGRPO. The repository includes both a synchronous V1 recipe and a V1 `separate_async` recipe, where dedicated rollout workers can overlap generation with training and improve throughput compared with the legacy v0 trainer path.
+| Model | Algorithm | Script | Acceleration / support | W&B run |
+|---|---|---|---|---|
+| Qwen-Image | FlowGRPO LoRA | [`run_qwen_image_ocr_lora.sh`](https://github.com/verl-project/verl-omni/blob/main/examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_lora.sh) | request-level batching | [v0.2.0 runs](https://wandb.ai/mikecheung/flow_grpo/runs/1vsrnhbd) |
+| Qwen-Image | FlowGRPO LoRA | [`run_qwen_image_ocr_lora_async_reward.sh`](https://github.com/verl-project/verl-omni/blob/main/examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_lora_async_reward.sh) | request-level batching, async reward | - |
+| Qwen-Image | FlowGRPO LoRA | [`run_qwen_image_ocr_lora_rollout_corr.sh`](https://github.com/verl-project/verl-omni/blob/main/examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_lora_rollout_corr.sh) | request-level batching, rollout correction bypass | - |
+| Qwen-Image | FlowGRPO full model | [`run_qwen_image_ocr.sh`](https://github.com/verl-project/verl-omni/blob/main/examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr.sh) | step-wise continuous batching, full-model training | [full model](https://wandb.ai/andyzhou/VeRL-Omni-demo/runs/8p8y9olb) |
+| SD3.5 Medium | FlowGRPO LoRA | [`run_sd35_medium_ocr_lora.sh`](https://github.com/verl-project/verl-omni/blob/main/examples/flowgrpo_trainer/sd35/run_sd35_medium_ocr_lora.sh) | request-level batching | [v0 trainer](https://wandb.ai/mikecheung/flow_grpo/runs/9ylk6e5f) |
+| SD3.5 Medium | FlowGRPO LoRA, V1 trainer | [`run_sd35_medium_ocr_lora_v1.sh`](https://github.com/verl-project/verl-omni/blob/main/examples/flowgrpo_trainer/sd35/run_sd35_medium_ocr_lora_v1.sh) | V1 trainer sync mode | [v1 trainer](https://wandb.ai/mikecheung/flow_grpo/runs/h04p15jr) |
+| SD3.5 Medium | FlowGRPO LoRA, V1 trainer | [`run_sd35_medium_ocr_lora_v1_separate_async.sh`](https://github.com/verl-project/verl-omni/blob/main/examples/flowgrpo_trainer/sd35/run_sd35_medium_ocr_lora_v1_separate_async.sh) | V1 trainer `separate_async`, dedicated rollout workers | - |
 
 ### Recipe and Benchmark
 
-Production-style Qwen-Image FlowGRPO recipes enable request-level batching by default and cover several common setups:
+The Qwen-Image LoRA OCR recipe is a good place to see the change. In the v0.1 line, rollout was the core bottleneck: each request effectively ran as serial `B≈1` DiT forwards, with 10 denoising steps and True-CFG doubling each step into two forwards. GPU utilization hovered around `80%`, not because the model was small, but because the engine could not keep enough diffusion work packed together.
 
-- `run_qwen_image_ocr_lora.sh`: Qwen-Image LoRA FlowGRPO with OCR reward.
-- `run_qwen_image_ocr_lora_async_reward.sh`: async reward on a dedicated resource pool.
-- `run_qwen_image_ocr_lora_rollout_corr.sh`: rollout-correction bypass mode.
+In `v0.2.0`, request-level packing changes that shape. Multiple complete requests are packed into one transformer forward, GPU utilization rises to about `100%`, and isolated generation time drops from `226s` to `108s`, a `52%` reduction. The same story shows up in per-image generation latency, which falls with the packed rollout path. Reference runs: [Qwen-Image OCR LoRA v0.1 (r)](https://wandb.ai/mikecheung/flow_grpo/runs/o7x44yrr) and [Qwen-Image OCR LoRA v0.2](https://wandb.ai/mikecheung/flow_grpo/runs/1vsrnhbd).
 
-Current reference numbers include:
+In the charts below, the blue curve is `v0.1` and the green curve is `v0.2`.
 
-- Qwen-Image FlowGRPO LoRA on 4 × H800: `420s` per step.
-- Async reward variant on 5 GPUs:  `360s` per step.
-- Rollout-correction bypass mode skips actor old-log-prob recomputation and saves about `20%` per-step time.
+<div style="display: flex; gap: 16px; justify-content: center; align-items: flex-start;">
+  <div style="width: 32%; text-align: center;">
+    <img
+      src="assets/qwen-image-gpu-utilization.svg"
+      alt="Qwen-Image FlowGRPO GPU utilization"
+      width="100%"
+    />
+    <p style="margin-top: 8px; text-align: center;"><em>GPU utilization rises after request-level packing.</em></p>
+  </div>
+  <div style="width: 32%; text-align: center;">
+    <img
+      src="assets/qwen-image-timing-gen.svg"
+      alt="Qwen-Image FlowGRPO generation time"
+      width="100%"
+    />
+    <p style="margin-top: 8px; text-align: center;"><em>Generation time drops from the v0.1 path to the v0.2 path.</em></p>
+  </div>
+  <div style="width: 32%; text-align: center;">
+    <img
+      src="assets/qwen-image-timing-step.svg"
+      alt="Qwen-Image FlowGRPO step time"
+      width="100%"
+    />
+    <p style="margin-top: 8px; text-align: center;"><em>Step time follows the same trend.</em></p>
+  </div>
+</div>
 
-[add some graphs]
+The production-style Qwen-Image FlowGRPO recipes enable request-level batching by default. The main entry points are `run_qwen_image_ocr_lora.sh` for the baseline OCR reward setup, `run_qwen_image_ocr_lora_async_reward.sh` for async reward on a dedicated resource pool, and `run_qwen_image_ocr_lora_rollout_corr.sh` for rollout-correction bypass mode. The request-level rollout knobs are intentionally small and explicit:
 
-SD3.5 FlowGRPO also has V1 trainer coverage:
+```bash
+actor_rollout_ref.rollout.step_execution=false
+++actor_rollout_ref.rollout.engine_kwargs.vllm_omni.max_num_seqs=32
+```
 
-- `run_sd35_medium_ocr_lora_v1.sh`: SD3.5 LoRA FlowGRPO with the V1 trainer in sync mode.
-- `run_sd35_medium_ocr_lora_v1_separate_async.sh`: SD3.5 LoRA FlowGRPO with V1 `separate_async` rollout.
+For Qwen-Image LoRA with True-CFG at 512 px, a practical tuning range is `max_num_seqs=8` to `32`; larger values can run into HBM pressure. SD3.5 has a lighter request-level memory shape and can use `max_num_seqs=256`.
 
+After rollout generation is packed, old-log-prob recomputation becomes the next obvious target. On the 4-GPU Qwen-Image LoRA OCR recipe, recomputing old log-probs on stored SDE latents is about `20%` of a `420s` step, roughly `80s`. Rollout-correction bypass mode skips that actor-side pass and reuses rollout log-probs as `old_log_probs`; it should be paired with rejection sampling because vLLM and PyTorch attention can still leave a small off-policy gap.
 
-[add some graphs and provide statistics]
+To turn it on, use the rollout-correction recipe or pass the same overrides yourself:
+
+```bash
+algorithm.rollout_correction.bypass_mode=True
+algorithm.rollout_correction.rollout_is=sequence
+algorithm.rollout_correction.rollout_rs=seq_mean_k1
+actor_rollout_ref.rollout.calculate_log_probs=True
+```
+
+The ready-to-run entry point is [`run_qwen_image_ocr_lora_rollout_corr.sh`](https://github.com/verl-project/verl-omni/blob/main/examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_lora_rollout_corr.sh). `calculate_log_probs=True` is the key switch that makes rollout return the log-probs needed by bypass mode.
+
+The recipe-level step-time numbers line up with that story: the baseline Qwen-Image FlowGRPO LoRA run is about `420s` per step on 4 × H800, while the async reward variant reaches about `360s` per step on 5 GPUs. Rollout-correction bypass removes another large chunk by skipping old-log-prob recomputation.
+
+SD3.5 FlowGRPO shows the trainer side of the same release. The repository includes `run_sd35_medium_ocr_lora_v1.sh` for the V1 trainer in sync mode and `run_sd35_medium_ocr_lora_v1_separate_async.sh` for V1 `separate_async` rollout. In the current benchmark, v0 and v1 are roughly tied on step time, but the V1 run has a cleaner stability story as reward rises through training. Reference runs: [SD3.5 Medium OCR LoRA v0 trainer](https://wandb.ai/mikecheung/flow_grpo/runs/9ylk6e5f) and [SD3.5 Medium OCR LoRA v1 trainer](https://wandb.ai/mikecheung/flow_grpo/runs/h04p15jr).
+
+<div style="display: flex; gap: 16px; justify-content: center; align-items: flex-start;">
+  <div style="width: 32%; text-align: center;">
+    <img
+      src="assets/sd3.5-m-timing-step.svg"
+      alt="SD3.5 FlowGRPO v0 versus v1 step time"
+      width="100%"
+    />
+    <p style="margin-top: 8px; text-align: center;"><em>SD3.5 v0 and V1 trainer step time are currently close.</em></p>
+  </div>
+  <div style="width: 32%; text-align: center;">
+    <img
+      src="assets/sd3.5-m-training-rewards.svg"
+      alt="SD3.5 FlowGRPO v0 versus v1 training rewards"
+      width="100%"
+    />
+    <p style="margin-top: 8px; text-align: center;"><em>Training rewards rise steadily on the V1 path.</em></p>
+  </div>
+  <div style="width: 32%; text-align: center;">
+    <img
+      src="assets/sd3.5-m-val-rewards.svg"
+      alt="SD3.5 FlowGRPO v0 versus v1 validation rewards"
+      width="100%"
+    />
+    <p style="margin-top: 8px; text-align: center;"><em>Validation rewards track the same stability story.</em></p>
+  </div>
+</div>
 
 ## 2. Stable Omni Training
 
@@ -77,28 +146,16 @@ The other is the reusable omni model adapter layer. Instead of wiring each archi
 
 ### Current Repository Support
 
-The current Qwen3-Omni adapter supports thinker-only training by redirecting training to the target component, stripping unused modules such as Talker and codec-related components, and working with FSDP/FSDP2 wrapping. This keeps inactive components out of the sharded training graph while preserving the multimodal processor and rollout interface.
+The current Qwen3-Omni adapter supports thinker-only training by redirecting training to the target component, stripping unused modules such as Talker and codec-related components, and working with FSDP/FSDP2 wrapping. Current stable omni training support is organized around these recipes:
 
-Supported algorithms:
+| Model | Training mode | Algorithm / data | Script | Support | W&B run |
+|---|---|---|---|---|---|
+| Qwen3-Omni Thinker | text -> text | GSPO on GSM8K | [`run_qwen3_omni_thinker_gspo_lora_v1.sh`](https://github.com/verl-project/verl-omni/blob/main/examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora_v1.sh) | V1 trainer, reusable omni adapter, FSDP2, vLLM-Omni rollout | [gsm8k](https://wandb.ai/mikecheung/gspo/runs/j5mro1tn) |
+| Qwen3-Omni Thinker | image -> text | GSPO on MMK12 | [`run_qwen3_omni_thinker_gspo_lora_mmk12_v1.sh`](https://github.com/verl-project/verl-omni/blob/main/examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora_mmk12_v1.sh) | V1 trainer, multimodal data, actor-rollout consistency signals | [MMK12](https://wandb.ai/mikecheung/gspo/runs/2j8hxr36) |
+| Qwen3-Omni Thinker | text + image + audio -> text | GSPO on AVQA-R1-6K | [`run_qwen3_omni_thinker_gspo_npu_avqa_v1.sh`](https://github.com/verl-project/verl-omni/blob/main/examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_npu_avqa_v1.sh) | V1 trainer, NPU recipe, multimodal inputs | - |
+| Qwen3-Omni Thinker | offline multimodal preference | Omni DPO on Omni-Preference | [`run_qwen3_omni_omni_preference_lora.sh`](https://github.com/verl-project/verl-omni/blob/main/examples/dpo_trainer/qwen3_omni/qwen3_omni/run_qwen3_omni_omni_preference_lora.sh) | Offline MLLM DPO dataset, `OmniDPOLoss`, modality-grouped batches | - |
 
-- **GSPO** for online RL-style training of the omni Thinker path. This is the most complete path today and is the main training flow for the released recipes.
-- **Omni DPO** for offline multimodal preference training. The release adds the offline MLLM preference dataset pipeline, Omni DPO config, and `OmniDPOLoss`.
 
-Supported multimodal training modes:
-
-- **Text -> text** reasoning through the GSM8K GSPO recipe.
-- **Image -> text** reasoning through the MMK12 GSPO recipe.
-- **Text + image + audio -> text** reasoning through the AVQA-R1-6K NPU recipe.
-- **Offline multimodal preference training** through the omni DPO data pipeline and trainer path.
-
-The V1 omni launchers also document healthy signals that users can check during training:
-
-- `training/rollout_actor_probs_pearson_corr` above `0.995`, showing actor and rollout agreement after weight sync.
-- `rollout_corr/log_ppl_diff` near zero, showing rollout and actor log-prob consistency.
-- Stable actor loss and gradient norm ranges.
-- Validation accuracy or reward rising with training steps.
-
-These signals matter because stable omni training needs evidence of correctness, not only a successful launch command.
 
 ### Recipe and Benchmark
 
@@ -143,13 +200,18 @@ This anchors the `v0.2.0` stability story: Qwen3-Omni training is no longer just
 
 ## Briefly: Other Updates
 
-The release also expands the broader VeRL-Omni surface:
+The release also expands the broader VeRL-Omni model and algorithm surface:
 
-- LTX-2.3 text-to-audio-video FlowGRPO with CLAP and ImageBind rewards.
-- Qwen-Image-Edit FlowGRPO and a general image-editing interface.
-- BAGEL full-parameter training with PickScore reward
-- DiNa-LRM reward support for SD3.5 FlowGRPO.
-- Ascend NPU Dockerfiles and install guide.
+| Model / family | Category | Modality | Algorithm / recipe | Update |
+|---|---|---|---|---|
+| [LTX2.3](https://github.com/verl-project/verl-omni/blob/main/examples/flowgrpo_trainer/ltx2/README.md) | Diffusion generator | Text -> Video + Audio | FlowGRPO | Adds text-to-video+audio training with CLAP and ImageBind rewards. |
+| [Qwen-Image-Edit](https://github.com/verl-project/verl-omni/blob/main/examples/flowgrpo_trainer/qwen_image_edit/README.md) | Diffusion image editor | Text + Image -> Image | FlowGRPO | Adds image-editing data preparation and a general edit-training interface. |
+| [BAGEL](https://github.com/verl-project/verl-omni/blob/main/examples/flowgrpo_trainer/bagel/README.md) | Unified understand + generation model | Text + Image | FlowGRPO | Adds full-parameter and LoRA recipes with OCR and PickScore rewards. |
+| [SD3.5 + DiNa-LRM](https://verl-omni.readthedocs.io/en/latest/examples/flowgrpo_trainer_sd35_drm.html) | Diffusion generator | Text -> Image | FlowGRPO with latent reward model | Scores clean diffusion latents directly, avoiding VAE decode during reward scoring. |
+| [Flow-DPPO](https://verl-omni.readthedocs.io/en/latest/algo/flowdppo.html) | Diffusion generator algorithm | Text/Image -> Image | Flow-DPPO | Adds an alternative policy-optimization recipe for Qwen-Image style diffusion RL. |
+| [Wan2.2](https://github.com/verl-project/verl-omni/blob/main/examples/dancegrpo_trainer/README.md) | Diffusion video generator | Text -> Video | DanceGRPO | Adds video-generation RL recipe coverage. |
+
+Outside the model-algorithm matrix, `v0.2.0` also adds Ascend NPU Dockerfiles and install guidance.
 
 ## Looking Ahead
 
