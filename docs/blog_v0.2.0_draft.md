@@ -44,6 +44,9 @@ The [rollout batching guide](https://verl-omni.readthedocs.io/en/latest/start/ro
 | SD3.5 Medium | FlowGRPO LoRA, V1 trainer | [`run_sd35_medium_ocr_lora_v1.sh`](https://github.com/verl-project/verl-omni/blob/main/examples/flowgrpo_trainer/sd35/run_sd35_medium_ocr_lora_v1.sh) | V1 trainer sync mode | [v1 trainer](https://wandb.ai/mikecheung/flow_grpo/runs/h04p15jr) |
 | SD3.5 Medium | FlowGRPO LoRA, V1 trainer | [`run_sd35_medium_ocr_lora_v1_separate_async.sh`](https://github.com/verl-project/verl-omni/blob/main/examples/flowgrpo_trainer/sd35/run_sd35_medium_ocr_lora_v1_separate_async.sh) | V1 trainer `separate_async`, dedicated rollout workers | - |
 
+
+A full diffusion post training support table in VeRL-Omni is available at [README.md](https://github.com/verl-project/verl-omni#model-and-algorithm-support-).
+
 ### Recipe and Benchmark
 
 The Qwen-Image LoRA OCR recipe is a good place to see the change. In the v0.1 line, rollout was the core bottleneck: each request effectively ran as serial `B≈1` DiT forwards, with 10 denoising steps and True-CFG doubling each step into two forwards. GPU utilization hovered around `80%`, not because the model was small, but because the engine could not keep enough diffusion work packed together.
@@ -156,6 +159,7 @@ The current Qwen3-Omni adapter supports thinker-only training by redirecting tra
 | Qwen3-Omni Thinker | offline multimodal preference | Omni DPO on Omni-Preference | [`run_qwen3_omni_omni_preference_lora.sh`](https://github.com/verl-project/verl-omni/blob/main/examples/dpo_trainer/qwen3_omni/qwen3_omni/run_qwen3_omni_omni_preference_lora.sh) | Offline MLLM DPO dataset, `OmniDPOLoss`, modality-grouped batches | - |
 
 
+A full omni post training support table in VeRL-Omni is available at [README.md](https://github.com/verl-project/verl-omni#model-and-algorithm-support-).
 
 ### Recipe and Benchmark
 
