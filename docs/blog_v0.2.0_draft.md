@@ -109,19 +109,19 @@ The best single recipe to highlight is **MMK12**. It exercises the new stable Qw
 <div style="display: flex; gap: 16px; justify-content: center; align-items: flex-start;">
   <div style="width: 45%; text-align: center;">
     <img
-      src="assets/mmk12_rollout_actor_probs_pearson_corr.svg"
-      alt="MMK12 training rollout_actor_probs_pearson_corr"
+      src="assets/mmk12_training_rewards.svg"
+      alt="MMK12 training rewards mean scores"
       width="100%"
     />
-    <p style="margin-top: 8px; text-align: center;"><em>MMK12 actor-rollout probability correlation during training.</em></p>
+    <p style="margin-top: 8px; text-align: center;"><em>MMK12 training rewards mean scores.</em></p>
   </div>
   <div style="width: 45%; text-align: center;">
     <img
-      src="assets/mmk12_rollout_corr_log_ppl_diff.svg"
-      alt="MMK12 rollout_corr/log_ppl_diff"
+      src="assets/mmk12_val_rewards.svg"
+      alt="MMK12 validation rewards mean scores"
       width="100%"
     />
-    <p style="margin-top: 8px; text-align: center;"><em>MMK12 rollout and actor log-prob consistency during training.</em></p>
+    <p style="margin-top: 8px; text-align: center;"><em>MMK12 validation rewards mean scores.</em></p>
   </div>
 </div>
 
