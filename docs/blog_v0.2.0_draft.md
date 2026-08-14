@@ -28,7 +28,7 @@ The faster diffusion RL work has two main features.
 
 - The trainer path matters just as much. Diffusion now has a V1 trainer path, bringing diffusion RL closer to the modern trainer architecture used elsewhere in VeRL-Omni and laying the groundwork for decoupled rollout and training execution.
 
-Faster rollout only matters if the generated trajectories and log-probs still describe the same policy. This release fixes several correctness-sensitive areas: request-batched diffusion log-probs, async rollout semantics, rollout correction, and rank-local LoRA weight-update routes. Rollout correction also pays back in step time: bypass mode can skip actor old-log-prob recomputation. 
+Faster rollout only matters if the generated trajectories and log-probs still describe the same policy. This release fixes several correctness-sensitive areas: request-batched diffusion log-probs, async rollout semantics, rank-local LoRA weight-update routes, and the hooks used by optional rollout-correction recipes.
 
 ### Newly Support
 
@@ -91,20 +91,7 @@ actor_rollout_ref.rollout.step_execution=false
 
 For Qwen-Image LoRA with True-CFG at 512 px, a practical tuning range is `max_num_seqs=8` to `32`; larger values can run into HBM pressure. SD3.5 has a lighter request-level memory shape and can use `max_num_seqs=256`.
 
-After rollout generation is packed, old-log-prob recomputation becomes the next obvious target. On the 4-GPU Qwen-Image LoRA OCR recipe, recomputing old log-probs on stored SDE latents is about `20%` of a `420s` step, roughly `80s`. Rollout-correction bypass mode skips that actor-side pass and reuses rollout log-probs as `old_log_probs`; it should be paired with rejection sampling because vLLM and PyTorch attention can still leave a small off-policy gap.
-
-To turn it on, use the rollout-correction recipe or pass the same overrides yourself:
-
-```bash
-algorithm.rollout_correction.bypass_mode=True
-algorithm.rollout_correction.rollout_is=sequence
-algorithm.rollout_correction.rollout_rs=seq_mean_k1
-actor_rollout_ref.rollout.calculate_log_probs=True
-```
-
-The ready-to-run entry point is [`run_qwen_image_ocr_lora_rollout_corr.sh`](https://github.com/verl-project/verl-omni/blob/main/examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_lora_rollout_corr.sh). `calculate_log_probs=True` is the key switch that makes rollout return the log-probs needed by bypass mode.
-
-The recipe-level step-time numbers line up with that story: the baseline Qwen-Image FlowGRPO LoRA run is about `420s` per step on 4 × H800, while the async reward variant reaches about `360s` per step on 5 GPUs. Rollout-correction bypass removes another large chunk by skipping old-log-prob recomputation.
+The recipe-level step-time numbers line up with that story: the baseline Qwen-Image FlowGRPO LoRA run is about `420s` per step on 4 × H800, while the async reward variant reaches about `360s` per step on 5 GPUs.
 
 SD3.5 FlowGRPO shows the trainer side of the same release. The repository includes `run_sd35_medium_ocr_lora_v1.sh` for the V1 trainer in sync mode and `run_sd35_medium_ocr_lora_v1_separate_async.sh` for V1 `separate_async` rollout. In the current benchmark, v0 and v1 are roughly tied on step time, but the V1 run has a cleaner stability story as reward rises through training. Reference runs: [SD3.5 Medium OCR LoRA v0 trainer](https://wandb.ai/mikecheung/flow_grpo/runs/9ylk6e5f) and [SD3.5 Medium OCR LoRA v1 trainer](https://wandb.ai/mikecheung/flow_grpo/runs/h04p15jr).
 
