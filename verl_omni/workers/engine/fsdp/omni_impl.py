@@ -192,19 +192,20 @@ class OmniFSDPEngine(FSDPEngineWithLMHead):
         with init_context(), warnings.catch_warnings():
             warnings.simplefilter("ignore")
 
-            module = AutoModelForMultimodalLM.from_pretrained(
-                pretrained_model_name_or_path=self.model_config.local_path,
-                torch_dtype=torch_dtype,
-                config=self.model_config.hf_config,
-                trust_remote_code=self.model_config.trust_remote_code,
-            )
-
             adapter_cls = OmniModelBase.get_class_by_name(
                 architecture,
                 self.model_config.model_stage,
                 self.model_config.get("external_lib"),
             )
             self.model_adapter_cls = adapter_cls
+            module = adapter_cls.build_module(self.model_config, torch_dtype)
+            if module is None:
+                module = AutoModelForMultimodalLM.from_pretrained(
+                    pretrained_model_name_or_path=self.model_config.local_path,
+                    torch_dtype=torch_dtype,
+                    config=self.model_config.hf_config,
+                    trust_remote_code=self.model_config.trust_remote_code,
+                )
             module = adapter_cls.configure_model(module, self.model_config)
 
             module.to(torch_dtype)

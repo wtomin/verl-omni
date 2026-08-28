@@ -386,6 +386,7 @@ def test_build_module_calls_adapter_configure_model(architecture):
     fake_module.named_parameters.return_value = [("weight", torch.nn.Parameter(torch.randn(2, 2)))]
 
     fake_adapter_cls = MagicMock()
+    fake_adapter_cls.build_module.return_value = None
     fake_configured_module = MagicMock(spec=torch.nn.Module)
     fake_configured_module.named_parameters.return_value = [("weight", torch.nn.Parameter(torch.randn(2, 2)))]
     fake_adapter_cls.configure_model.return_value = fake_configured_module
@@ -424,6 +425,43 @@ def test_build_module_calls_adapter_configure_model(architecture):
 
         fake_adapter_cls.configure_model.assert_called_once_with(fake_module, model_config)
         assert result is fake_configured_module
+
+
+def test_build_module_uses_adapter_build_module_when_provided():
+    """Adapters can override the default AutoModelForMultimodalLM load path."""
+    omni_impl = _get_omni_impl_module()
+    model_config = _make_mock_model_config(architecture="MiniCPMV4ForConditionalGeneration")
+
+    fake_loaded_module = MagicMock(spec=torch.nn.Module)
+    fake_configured_module = MagicMock(spec=torch.nn.Module)
+    fake_configured_module.named_parameters.return_value = [("weight", torch.nn.Parameter(torch.randn(2, 2)))]
+
+    fake_adapter_cls = MagicMock()
+    fake_adapter_cls.build_module.return_value = fake_loaded_module
+    fake_adapter_cls.configure_model.return_value = fake_configured_module
+    model_base_mod = sys.modules["verl_omni.pipelines.model_base"]
+
+    with (
+        patch.object(omni_impl.AutoModelForMultimodalLM, "from_pretrained") as mock_from_pretrained,
+        patch.object(model_base_mod.OmniModelBase, "get_class_by_name", return_value=fake_adapter_cls),
+        patch.object(omni_impl, "get_init_weight_context_manager", return_value=MagicMock()),
+        patch.object(omni_impl.warnings, "catch_warnings", return_value=MagicMock()),
+        patch("verl.utils.torch_dtypes.PrecisionType") as mock_precision,
+    ):
+        mock_precision.to_dtype.return_value = torch.bfloat16
+        engine = object.__new__(omni_impl.OmniFSDPEngine)
+        engine.model_config = model_config
+        engine.engine_config = MagicMock()
+        engine.engine_config.model_dtype = None
+        engine.engine_config.forward_only = True
+        engine.device_mesh = None
+
+        result = engine._build_module()
+
+    fake_adapter_cls.build_module.assert_called_once_with(model_config, torch.bfloat16)
+    mock_from_pretrained.assert_not_called()
+    fake_adapter_cls.configure_model.assert_called_once_with(fake_loaded_module, model_config)
+    assert result is fake_configured_module
 
 
 @pytest.mark.parametrize("option", ["use_liger", "use_fused_kernels"])
