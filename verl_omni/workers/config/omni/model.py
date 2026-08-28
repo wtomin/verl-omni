@@ -167,11 +167,12 @@ class OmniModelConfig(BaseConfig):
 
         # Build hf_config so the FSDP engine can load and wrap the model.
         self.local_hf_config_path = copy_to_local(self.hf_config_path, use_shm=self.use_shm)
-        attn_implementation = self.override_config.get("attn_implementation", "flash_attention_2")
+        hf_config_overrides = dict(self.override_config)
+        hf_config_overrides.setdefault("attn_implementation", "flash_attention_2")
         self.hf_config = AutoConfig.from_pretrained(
             self.local_hf_config_path,
             trust_remote_code=self.trust_remote_code,
-            attn_implementation=attn_implementation,
+            **hf_config_overrides,
         )
 
         self.share_embeddings_and_output_weights = getattr(self.hf_config, "tie_word_embeddings", False)
