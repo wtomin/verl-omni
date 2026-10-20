@@ -1,0 +1,51 @@
+name: publish
+
+on:
+  schedule:
+    # 08:00 Asia/Shanghai, after the 22:00 L3 nightly.
+    - cron: "0 0 * * *"
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Build L3 dashboard
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python build_dashboard.py \
+            --repo verl-project/verl-omni \
+            --branch main \
+            --max-reports 30 \
+            --output site/kanban/pages/index.html \
+            --history-url https://verl-project.github.io/verl-omni/kanban/pages/history.json
+          cp site/kanban/pages/index.html site/kanban/pages.html
+          printf '%s\n' '<!DOCTYPE html><meta http-equiv="refresh" content="0; url=kanban/pages/">' > site/index.html
+          touch site/.nojekyll
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+      - id: deployment
+        uses: actions/deploy-pages@v4
